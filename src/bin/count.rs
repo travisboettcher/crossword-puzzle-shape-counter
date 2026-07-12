@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use crossword_grids::{brute, Style};
+use crossword_grids::{count_american, count_british, Style};
 
 fn main() {
     let mut style = Style::American;
@@ -39,8 +39,10 @@ fn main() {
     }
 
     let start = Instant::now();
-    // For now the CLI drives the brute-force oracle; the DP will be wired in later.
-    let total = brute::count(n, style);
+    let total = match style {
+        Style::American => count_american(n),
+        Style::British => count_british(n),
+    };
     let elapsed = start.elapsed();
     println!(
         "{} {}x{}: {} valid grids  ({:.3?})",
