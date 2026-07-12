@@ -133,12 +133,40 @@ fn uf_union(parent: &mut [usize; MAXN], a: usize, b: usize) {
 
 // --- transition ------------------------------------------------------------
 
-/// Advance the frontier `key` by placing a new row with white mask `w`.
-/// Returns the new packed state, or `None` if the transition is invalid.
-fn step(key: u128, w: u32, n: usize, style: Style) -> Option<u128> {
-    let mut vcap = [0u8; MAXN];
-    let mut label = [0u8; MAXN];
-    let flags = decode(key, n, &mut vcap, &mut label);
+/// Columns that a valid next row is *forced* to keep white: closing them now
+/// would create an illegal short vertical run. American: capped length 1 or 2.
+#[inline]
+fn forced_mask(vcap: &[u8; MAXN], n: usize, style: Style) -> u32 {
+    let mut f = 0u32;
+    match style {
+        Style::American => {
+            for j in 0..n {
+                if vcap[j] == 1 || vcap[j] == 2 {
+                    f |= 1 << j;
+                }
+            }
+        }
+        Style::British => {
+            for j in 0..n {
+                if vcap[j] == 2 {
+                    f |= 1 << j;
+                }
+            }
+        }
+    }
+    f
+}
+
+/// The transition body, given the already-decoded frontier.
+#[inline]
+fn step_decoded(
+    vcap: &[u8; MAXN],
+    label: &[u8; MAXN],
+    flags: u8,
+    w: u32,
+    n: usize,
+    style: Style,
+) -> Option<u128> {
     let white = |j: usize| (w >> j) & 1 == 1;
 
     // 1. Vertical-run closures (white above, black now).
@@ -234,11 +262,18 @@ fn advance(map: Map, rows: &[u32], n: usize, style: Style, first_row: bool) -> M
     entries
         .par_iter()
         .fold(AHashMap::new, |mut acc: Map, &(st, cnt)| {
+            let mut vcap = [0u8; MAXN];
+            let mut label = [0u8; MAXN];
+            let flags = decode(st, n, &mut vcap, &mut label);
+            let forced = forced_mask(&vcap, n, style);
             for &w in rows {
                 if first_row && w == 0 {
                     continue; // Rule 4: top row has a white square
                 }
-                if let Some(ns) = step(st, w, n, style) {
+                if w & forced != forced {
+                    continue; // a run that must continue would be closed
+                }
+                if let Some(ns) = step_decoded(&vcap, &label, flags, w, n, style) {
                     *acc.entry(ns).or_insert(0) += cnt;
                 }
             }
@@ -285,10 +320,15 @@ pub fn count_sym(n: usize, style: Style) -> u128 {
     let rows = allowed_rows(n, style);
 
     // Top half: rows 0..=h-1.
+    let instrument = std::env::var("DP_STATS").is_ok();
+    let t0 = std::time::Instant::now();
     let mut map: Map = AHashMap::new();
     map.insert(0, 1);
     for i in 0..h {
         map = advance(map, &rows, n, style, i == 0);
+        if instrument {
+            eprintln!("  row {i}: {} states ({:.2?})", map.len(), t0.elapsed());
+        }
     }
 
     // Center gluing (parallel over surviving top-half frontiers).
@@ -297,6 +337,15 @@ pub fn count_sym(n: usize, style: Style) -> u128 {
         .copied()
         .filter(|&m| is_palindrome(m, n))
         .collect();
+    if instrument {
+        eprintln!(
+            "  top-half done: {} states, {} centers, {} rows ({:.2?})",
+            map.len(),
+            centers.len(),
+            rows.len(),
+            t0.elapsed()
+        );
+    }
     let entries: Vec<(u128, u128)> = map.into_iter().collect();
     entries
         .par_iter()

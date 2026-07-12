@@ -239,8 +239,20 @@ fn advance(map: Map, rows: &[u32], n: usize, first_row: bool) -> Map {
     entries
         .par_iter()
         .fold(AHashMap::new, |mut acc: Map, &(st, cnt)| {
+            // Columns forced to stay white: a length-2 run (can't close) or a
+            // length-1 run whose cell is unchecked (closing would strand it).
+            let mut forced = 0u32;
+            for j in 0..n {
+                let l = col_len(st[j]);
+                if l == 2 || (l == 1 && col_bits(st[j]) & 1 == 0) {
+                    forced |= 1 << j;
+                }
+            }
             for &w in rows {
                 if first_row && w == 0 {
+                    continue;
+                }
+                if w & forced != forced {
                     continue;
                 }
                 if let Some(ns) = step(&st, w, n) {
@@ -264,10 +276,15 @@ pub fn count(n: usize, style: Style) -> u128 {
     let h = (n - 1) / 2;
     let rows = allowed_rows(n);
 
+    let instrument = std::env::var("DP_STATS").is_ok();
+    let t0 = std::time::Instant::now();
     let mut map: Map = AHashMap::new();
     map.insert([0u16; SLOTS], 1);
     for i in 0..h {
         map = advance(map, &rows, n, i == 0);
+        if instrument {
+            eprintln!("  row {i}: {} states ({:.2?})", map.len(), t0.elapsed());
+        }
     }
 
     let centers: Vec<u32> = rows
@@ -275,6 +292,14 @@ pub fn count(n: usize, style: Style) -> u128 {
         .copied()
         .filter(|&m| is_palindrome(m, n))
         .collect();
+    if instrument {
+        eprintln!(
+            "  top-half done: {} states, {} centers ({:.2?})",
+            map.len(),
+            centers.len(),
+            t0.elapsed()
+        );
+    }
     let entries: Vec<(Key, u128)> = map.into_iter().collect();
     entries
         .par_iter()
