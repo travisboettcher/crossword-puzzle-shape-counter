@@ -71,11 +71,12 @@ value. Timings are wall-clock on 4 cores.
 | 5 | 12 | ✓ | 17 | ✓ |
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
-| 11 | 17,438,702 | ✓ | 60,384,181 | _see below_ |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | _see below_ |
-| 15 | 404,139,015,237,875 | _see below_ | *open problem* | *stretch* |
+| 11 | 17,438,702 | ✓ | 60,384,181 | _in progress_ |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | _in progress_ |
+| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | *stretch* |
 
-<!-- RESULTS: updated as the large sizes finish computing. -->
+American reproduces A323839 through 15×15. British is validated through 9×9;
+11×11 and 13×13 are in progress.
 
 ## Usage
 

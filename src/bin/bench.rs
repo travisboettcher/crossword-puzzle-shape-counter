@@ -1,4 +1,4 @@
-use crossword_grids::{dp, Style};
+use crossword_grids::{british, dp, Style};
 use std::time::Instant;
 fn main() {
     let mut a = std::env::args().skip(1);
@@ -8,6 +8,9 @@ fn main() {
     };
     let n: usize = a.next().unwrap().parse().unwrap();
     let t = Instant::now();
-    let got = dp::count_sym(n, style);
+    let got = match style {
+        Style::American => dp::count_sym(n, style),
+        Style::British => british::count(n, style),
+    };
     println!("{} n={n}: {got} ({:.2?})", style.as_str(), t.elapsed());
 }
