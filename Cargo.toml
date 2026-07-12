@@ -1,0 +1,15 @@
+[package]
+name = "crossword-grids"
+version = "0.1.0"
+edition = "2021"
+description = "Counting valid n×n American- and British-style crossword grids via a transfer-matrix / frontier DP"
+license = "MIT"
+
+[[bin]]
+name = "count"
+path = "src/bin/count.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
