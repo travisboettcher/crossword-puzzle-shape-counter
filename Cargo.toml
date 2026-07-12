@@ -5,6 +5,10 @@ edition = "2021"
 description = "Counting valid n×n American- and British-style crossword grids via a transfer-matrix / frontier DP"
 license = "MIT"
 
+[dependencies]
+ahash = "0.8"
+rayon = "1"
+
 [[bin]]
 name = "count"
 path = "src/bin/count.rs"

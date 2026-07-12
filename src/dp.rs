@@ -1,50 +1,64 @@
-//! Transfer-matrix / frontier DP that counts valid grids by processing the grid
-//! one row at a time, merging partial grids that share a frontier.
-//!
-//! This module currently implements the **non-symmetric** American count (M1):
-//! it counts grids obeying every rule *except* 180° symmetry, and exists to
-//! validate the connectivity + vertical-run machinery against
-//! [`crate::brute::count_nosym`] before the symmetry folding (M2) is added.
+//! Transfer-matrix / frontier DP that counts valid grids row by row, merging
+//! partial grids that share a frontier.
 //!
 //! ## Frontier state
-//! After placing rows `0..=i`, the frontier is row `i`. For each column `j` we
-//! store:
-//!   * `vcap` ∈ {0,1,2,3}: the length (capped at 3) of the vertical white run
-//!     ending at `(i, j)`; 0 means `(i, j)` is black.
+//! After placing a set of rows, the frontier is the last row placed. For each
+//! column `j` we store:
+//!   * `vcap` ∈ {0,1,2,3}: length (capped at 3) of the vertical white run ending
+//!     at the frontier in column `j`; 0 means the frontier cell is black.
 //!   * `label`: a connectivity id. Two white columns share a label iff their
 //!     frontier cells are joined through already-placed cells. Labels are
-//!     canonicalized (restricted-growth) so equivalent frontiers hash equal.
-//! Plus two flags `e0`, `eN` recording whether column 0 / column n-1 has ever
-//! held a white cell (Rule 4).
+//!     canonicalized (restricted-growth) so equivalent frontiers coincide.
+//! Plus flags `e0`, `eN` recording whether column 0 / column n-1 has ever held a
+//! white cell (Rule 4).
+//!
+//! The whole state is packed into a single `u128`: 6 bits per column
+//! (`label << 2 | vcap`) plus 2 flag bits, which fits every `n ≤ 21`.
 //!
 //! ## Connectivity invariant
-//! In a single connected region no component is ever fully sealed before the
-//! bottom of the grid, so an interior transition that would make an old
-//! component vanish is rejected. The final "seal" (an implicit all-black row
-//! past the bottom) accepts iff exactly one component remains.
+//! In a single connected region no component is sealed off before the region is
+//! complete, so a transition that makes an old component vanish is rejected.
+//! * Non-symmetric count ([`count_nosym`]): the final all-black seal accepts iff
+//!   exactly one component remains.
+//! * Symmetric count ([`count_sym`]): the strict top half forbids every
+//!   component death (a component sealed in the top half has its mirror sealed in
+//!   the bottom half → two pieces), then the center row is glued to the mirrored
+//!   bottom frontier.
 
-use std::collections::HashMap;
+use ahash::AHashMap;
+use rayon::prelude::*;
 
 use crate::rules::Style;
 
-/// Column byte layout: bits 0..2 = `vcap` (0..3), bits 2.. = connectivity label.
+const MAXN: usize = 21;
+const BITS_PER_COL: u32 = 6;
+
+type Map = AHashMap<u128, u128>;
+
+// --- state packing ---------------------------------------------------------
+
 #[inline]
-fn make_col(label: u8, vcap: u8) -> u8 {
-    (label << 2) | vcap
-}
-#[inline]
-fn col_vcap(b: u8) -> u8 {
-    b & 0b11
-}
-#[inline]
-fn col_label(b: u8) -> u8 {
-    b >> 2
+fn decode(key: u128, n: usize, vcap: &mut [u8; MAXN], label: &mut [u8; MAXN]) -> u8 {
+    for (j, (vc, lb)) in vcap.iter_mut().zip(label.iter_mut()).enumerate().take(n) {
+        let b = ((key >> (BITS_PER_COL * j as u32)) & 0x3f) as u8;
+        *vc = b & 0b11;
+        *lb = b >> 2;
+    }
+    ((key >> (BITS_PER_COL * n as u32)) & 0b11) as u8
 }
 
-/// A frontier state: `n` column bytes followed by one flag byte (`e0 | eN<<1`).
-type State = Vec<u8>;
+#[inline]
+fn encode(vcap: &[u8; MAXN], label: &[u8; MAXN], n: usize, flags: u8) -> u128 {
+    let mut key: u128 = 0;
+    for j in 0..n {
+        let b = ((label[j] << 2) | vcap[j]) as u128;
+        key |= b << (BITS_PER_COL * j as u32);
+    }
+    key | ((flags as u128) << (BITS_PER_COL * n as u32))
+}
 
-/// Rows (as white bit masks) whose horizontal runs are legal for `style`.
+// --- row / run helpers -----------------------------------------------------
+
 fn allowed_rows(n: usize, style: Style) -> Vec<u32> {
     let full: u32 = (1u32 << n) - 1;
     (0..=full)
@@ -63,16 +77,9 @@ fn row_ok_horizontal(mask: u32, n: usize, style: Style) -> bool {
             }
             let len = j - start;
             match style {
-                Style::American => {
-                    if len < 3 {
-                        return false;
-                    }
-                }
-                Style::British => {
-                    if len == 2 {
-                        return false;
-                    }
-                }
+                Style::American if len < 3 => return false,
+                Style::British if len == 2 => return false,
+                _ => {}
             }
         } else {
             j += 1;
@@ -81,191 +88,336 @@ fn row_ok_horizontal(mask: u32, n: usize, style: Style) -> bool {
     true
 }
 
-/// Advance the frontier by placing a new row with white mask `w`.
-/// Returns the new state, or `None` if the transition is invalid (an illegal
-/// vertical run closes, or a component would be sealed off mid-grid).
-fn step(old: &State, w: u32, n: usize, style: Style) -> Option<State> {
-    debug_assert_eq!(old.len(), n + 1);
+/// May a vertical run of capped length `vc` close now? American: needs ≥ 3.
+fn vrun_close_ok(style: Style, vc: u8) -> bool {
+    match style {
+        Style::American => vc >= 3,
+        Style::British => vc != 2, // refined in M4
+    }
+}
 
-    // 1. Vertical-run closures: columns white above, black now.
+/// A vertical run crossing the center: capped length `a` above, `b` below, plus
+/// the center cell. Caps only merge lengths ≥ 3 (always legal), so this decides
+/// correctly.
+fn cross_run_ok(style: Style, a: u8, b: u8) -> bool {
+    match style {
+        Style::American => a >= 3 || b >= 3 || a + b >= 2, // total a + 1 + b ≥ 3
+        Style::British => a + 1 + b != 2,                  // refined in M4
+    }
+}
+
+// --- union-find on a stack array ------------------------------------------
+
+#[inline]
+fn uf_find(parent: &mut [usize; MAXN], x: usize) -> usize {
+    let mut r = x;
+    while parent[r] != r {
+        r = parent[r];
+    }
+    let mut c = x;
+    while parent[c] != r {
+        let nxt = parent[c];
+        parent[c] = r;
+        c = nxt;
+    }
+    r
+}
+#[inline]
+fn uf_union(parent: &mut [usize; MAXN], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        parent[ra] = rb;
+    }
+}
+
+// --- transition ------------------------------------------------------------
+
+/// Advance the frontier `key` by placing a new row with white mask `w`.
+/// Returns the new packed state, or `None` if the transition is invalid.
+fn step(key: u128, w: u32, n: usize, style: Style) -> Option<u128> {
+    let mut vcap = [0u8; MAXN];
+    let mut label = [0u8; MAXN];
+    let flags = decode(key, n, &mut vcap, &mut label);
+    let white = |j: usize| (w >> j) & 1 == 1;
+
+    // 1. Vertical-run closures (white above, black now).
     for j in 0..n {
-        let vc = col_vcap(old[j]);
-        let now_white = (w >> j) & 1 == 1;
-        if vc > 0 && !now_white {
-            // Run of capped length `vc` closes here.
-            if !vrun_close_ok(style, vc) {
-                return None;
-            }
+        if vcap[j] > 0 && !white(j) && !vrun_close_ok(style, vcap[j]) {
+            return None;
         }
     }
 
     // 2. Union-find over the new row's white columns.
-    let mut uf = Uf::new(n);
-    let white = |j: usize| (w >> j) & 1 == 1;
-    // horizontal adjacency within the new row
+    let mut parent = [0usize; MAXN];
+    for (j, p) in parent.iter_mut().enumerate().take(n) {
+        *p = j;
+    }
     for j in 0..n.saturating_sub(1) {
         if white(j) && white(j + 1) {
-            uf.union(j, j + 1);
+            uf_union(&mut parent, j, j + 1);
         }
     }
-    // shared old component (cells sitting below the same old component)
-    let mut first_below: HashMap<u8, usize> = HashMap::new();
+    // cells sitting below the same old component
+    let mut first_below = [usize::MAX; MAXN]; // indexed by old label
     for j in 0..n {
-        if white(j) && col_vcap(old[j]) > 0 {
-            let c = col_label(old[j]);
-            match first_below.get(&c) {
-                Some(&j0) => uf.union(j0, j),
-                None => {
-                    first_below.insert(c, j);
-                }
+        if white(j) && vcap[j] > 0 {
+            let c = label[j] as usize;
+            if first_below[c] == usize::MAX {
+                first_below[c] = j;
+            } else {
+                uf_union(&mut parent, first_below[c], j);
             }
         }
     }
 
-    // 3. Which old components continue? Any old component with no cell below it
-    //    is sealed — reject (interior death breaks single-connectivity).
-    let mut old_comps: Vec<u8> = Vec::new();
+    // 3. Reject if any old component has no continuation (sealed mid-grid).
     for j in 0..n {
-        if col_vcap(old[j]) > 0 {
-            let c = col_label(old[j]);
-            if !old_comps.contains(&c) {
-                old_comps.push(c);
-            }
-        }
-    }
-    for &c in &old_comps {
-        if !first_below.contains_key(&c) {
-            return None; // component sealed mid-grid
+        if vcap[j] > 0 && first_below[label[j] as usize] == usize::MAX {
+            return None;
         }
     }
 
-    // 4. Build the new canonical frontier.
-    let mut new_state = vec![0u8; n + 1];
-    let mut root_to_label: HashMap<usize, u8> = HashMap::new();
+    // 4. Canonical new frontier.
+    let mut nvcap = [0u8; MAXN];
+    let mut nlabel = [0u8; MAXN];
+    let mut root_label = [0u8; MAXN]; // root column -> new label (0 = unassigned)
     let mut next_label: u8 = 1;
     for j in 0..n {
         if white(j) {
-            let r = uf.find(j);
-            let label = *root_to_label.entry(r).or_insert_with(|| {
-                let l = next_label;
+            let r = uf_find(&mut parent, j);
+            if root_label[r] == 0 {
+                root_label[r] = next_label;
                 next_label += 1;
-                l
-            });
-            let vc = col_vcap(old[j]);
-            let new_vc = if vc > 0 { (vc + 1).min(3) } else { 1 };
-            new_state[j] = make_col(label, new_vc);
-        } else {
-            new_state[j] = 0;
+            }
+            nlabel[j] = root_label[r];
+            nvcap[j] = if vcap[j] > 0 { (vcap[j] + 1).min(3) } else { 1 };
         }
     }
 
-    // 5. Rule-4 edge-column flags.
-    let old_flags = old[n];
-    let mut e0 = old_flags & 1;
-    let mut en = (old_flags >> 1) & 1;
+    let mut nflags = flags;
     if white(0) {
-        e0 = 1;
+        nflags |= 1;
     }
     if white(n - 1) {
-        en = 1;
+        nflags |= 2;
     }
-    new_state[n] = e0 | (en << 1);
-
-    Some(new_state)
+    Some(encode(&nvcap, &nlabel, n, nflags))
 }
 
-/// Is it legal for a vertical run of capped length `vc` (1, 2, or 3=">=3") to
-/// close now? For American every run must be ≥ 3.
-fn vrun_close_ok(style: Style, vc: u8) -> bool {
-    match style {
-        Style::American => vc >= 3,
-        // British handling arrives with M4; length-2 is always illegal.
-        Style::British => vc != 2,
-    }
-}
-
-/// Accept the frontier as a completed grid: seal with an implicit all-black row.
-fn terminal_ok(st: &State, n: usize, style: Style) -> bool {
-    // All remaining vertical runs close now.
-    let mut comps: Vec<u8> = Vec::new();
+/// Terminal acceptance for the non-symmetric count: seal with an all-black row.
+fn terminal_ok(key: u128, n: usize, style: Style) -> bool {
+    let mut vcap = [0u8; MAXN];
+    let mut label = [0u8; MAXN];
+    let flags = decode(key, n, &mut vcap, &mut label);
+    let mut seen = [false; MAXN];
+    let mut comps = 0usize;
     for j in 0..n {
-        let vc = col_vcap(st[j]);
-        if vc > 0 {
-            if !vrun_close_ok(style, vc) {
+        if vcap[j] > 0 {
+            if !vrun_close_ok(style, vcap[j]) {
                 return false;
             }
-            let c = col_label(st[j]);
-            if !comps.contains(&c) {
-                comps.push(c);
+            let c = label[j] as usize;
+            if !seen[c] {
+                seen[c] = true;
+                comps += 1;
             }
         }
     }
-    // Exactly one connected component, and both edge columns were used.
-    let flags = st[n];
-    let e0 = flags & 1 == 1;
-    let en = (flags >> 1) & 1 == 1;
-    comps.len() == 1 && e0 && en
+    comps == 1 && (flags & 1 == 1) && (flags & 2 == 2)
+}
+
+// --- parallel row transition ----------------------------------------------
+
+fn advance(map: Map, rows: &[u32], n: usize, style: Style, first_row: bool) -> Map {
+    let entries: Vec<(u128, u128)> = map.into_iter().collect();
+    entries
+        .par_iter()
+        .fold(AHashMap::new, |mut acc: Map, &(st, cnt)| {
+            for &w in rows {
+                if first_row && w == 0 {
+                    continue; // Rule 4: top row has a white square
+                }
+                if let Some(ns) = step(st, w, n, style) {
+                    *acc.entry(ns).or_insert(0) += cnt;
+                }
+            }
+            acc
+        })
+        .reduce(AHashMap::new, |mut a, b| {
+            for (k, v) in b {
+                *a.entry(k).or_insert(0) += v;
+            }
+            a
+        })
 }
 
 /// Count valid n×n grids of `style`, **without** the 180° symmetry rule (M1).
 pub fn count_nosym(n: usize, style: Style) -> u128 {
-    assert!(n >= 5 && n % 2 == 1);
+    assert!(n >= 5 && n % 2 == 1 && n <= MAXN);
     let rows = allowed_rows(n, style);
-
-    let mut map: HashMap<State, u128> = HashMap::new();
-    map.insert(vec![0u8; n + 1], 1);
-
+    let mut map: Map = AHashMap::new();
+    map.insert(0, 1);
     for i in 0..n {
-        let mut next: HashMap<State, u128> = HashMap::new();
-        for (st, &cnt) in &map {
-            for &w in &rows {
-                // Rule 4: top and bottom rows must contain a white square.
-                if (i == 0 || i == n - 1) && w == 0 {
-                    continue;
-                }
-                if let Some(ns) = step(st, w, n, style) {
-                    *next.entry(ns).or_insert(0) += cnt;
-                }
-            }
-        }
-        map = next;
+        let last = i == n - 1;
+        // Rule 4: bottom row must also contain a white square.
+        let rows_i: Vec<u32> = if last {
+            rows.iter().copied().filter(|&w| w != 0).collect()
+        } else {
+            rows.clone()
+        };
+        map = advance(map, &rows_i, n, style, i == 0);
     }
-
-    map.iter()
-        .filter(|(st, _)| terminal_ok(st, n, style))
-        .map(|(_, &c)| c)
+    let entries: Vec<(u128, u128)> = map.into_iter().collect();
+    entries
+        .par_iter()
+        .filter(|&&(st, _)| terminal_ok(st, n, style))
+        .map(|&(_, c)| c)
         .sum()
 }
 
-/// A tiny union-find over `0..n`.
-struct Uf {
-    parent: Vec<usize>,
+// --- M2: symmetry folding + center gluing ---------------------------------
+
+/// Count valid 180°-symmetric n×n grids of `style` (the published quantity).
+pub fn count_sym(n: usize, style: Style) -> u128 {
+    assert!(n >= 5 && n % 2 == 1 && n <= MAXN);
+    let h = (n - 1) / 2;
+    let rows = allowed_rows(n, style);
+
+    // Top half: rows 0..=h-1.
+    let mut map: Map = AHashMap::new();
+    map.insert(0, 1);
+    for i in 0..h {
+        map = advance(map, &rows, n, style, i == 0);
+    }
+
+    // Center gluing (parallel over surviving top-half frontiers).
+    let centers: Vec<u32> = rows
+        .iter()
+        .copied()
+        .filter(|&m| is_palindrome(m, n))
+        .collect();
+    let entries: Vec<(u128, u128)> = map.into_iter().collect();
+    entries
+        .par_iter()
+        .map(|&(st, cnt)| {
+            let mut local = 0u128;
+            for &c in &centers {
+                if glue_ok(st, c, n, style) {
+                    local += cnt;
+                }
+            }
+            local
+        })
+        .sum()
 }
-impl Uf {
-    fn new(n: usize) -> Self {
-        Uf {
-            parent: (0..n).collect(),
+
+fn is_palindrome(mask: u32, n: usize) -> bool {
+    (0..n).all(|j| (mask >> j) & 1 == (mask >> (n - 1 - j)) & 1)
+}
+
+/// Glue a top-half frontier `key` to center row `c` (a palindrome) and its
+/// mirrored bottom half. Returns whether the resulting full grid is valid.
+fn glue_ok(key: u128, c: u32, n: usize, style: Style) -> bool {
+    let mut vcap = [0u8; MAXN];
+    let mut label = [0u8; MAXN];
+    let flags = decode(key, n, &mut vcap, &mut label);
+    let cw = |j: usize| (c >> j) & 1 == 1;
+
+    // 1. Vertical-run rules around the center.
+    for j in 0..n {
+        if cw(j) {
+            if !cross_run_ok(style, vcap[j], vcap[n - 1 - j]) {
+                return false;
+            }
+        } else if vcap[j] > 0 && !vrun_close_ok(style, vcap[j]) {
+            return false;
         }
     }
-    fn find(&mut self, x: usize) -> usize {
-        let mut r = x;
-        while self.parent[r] != r {
-            r = self.parent[r];
-        }
-        // path compression
-        let mut c = x;
-        while self.parent[c] != r {
-            let next = self.parent[c];
-            self.parent[c] = r;
-            c = next;
-        }
-        r
+
+    // 2. Rule 4 (edge columns).
+    let used0 = flags & 1 == 1;
+    let usedn = flags & 2 == 2;
+    if !(used0 || usedn || cw(0)) {
+        return false;
     }
-    fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra != rb {
-            self.parent[ra] = rb;
+
+    // 3. Connectivity: glue top classes, center cells, mirrored bottom classes.
+    let m = (0..n).map(|j| label[j]).max().unwrap_or(0) as usize; // labels 1..=m
+    if m == 0 {
+        return false;
+    }
+    // Node layout: top class k -> k-1; bottom class k -> m+(k-1); center j -> 2m+j.
+    let size = 2 * m + n;
+    let mut parent = [0usize; MAXN * 3];
+    for (i, p) in parent.iter_mut().enumerate().take(size) {
+        *p = i;
+    }
+    let top_node = |k: u8| (k as usize) - 1;
+    let bot_node = |k: u8| m + (k as usize) - 1;
+    let cen_node = |j: usize| 2 * m + j;
+
+    for j in 0..n {
+        if cw(j) {
+            if j + 1 < n && cw(j + 1) {
+                union3(&mut parent, cen_node(j), cen_node(j + 1));
+            }
+            if vcap[j] > 0 {
+                union3(&mut parent, cen_node(j), top_node(label[j]));
+            }
+            if vcap[n - 1 - j] > 0 {
+                union3(&mut parent, cen_node(j), bot_node(label[n - 1 - j]));
+            }
         }
+    }
+
+    // All top classes, bottom classes, and center white cells must coincide.
+    let mut root: Option<usize> = None;
+    let same = |node: usize, parent: &mut [usize; MAXN * 3], root: &mut Option<usize>| {
+        let r = find3(parent, node);
+        match *root {
+            None => {
+                *root = Some(r);
+                true
+            }
+            Some(rr) => rr == r,
+        }
+    };
+    for k in 1..=m as u8 {
+        if !same(top_node(k), &mut parent, &mut root) {
+            return false;
+        }
+        if !same(bot_node(k), &mut parent, &mut root) {
+            return false;
+        }
+    }
+    for j in 0..n {
+        if cw(j) && !same(cen_node(j), &mut parent, &mut root) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+fn find3(parent: &mut [usize; MAXN * 3], x: usize) -> usize {
+    let mut r = x;
+    while parent[r] != r {
+        r = parent[r];
+    }
+    let mut c = x;
+    while parent[c] != r {
+        let nxt = parent[c];
+        parent[c] = r;
+        c = nxt;
+    }
+    r
+}
+#[inline]
+fn union3(parent: &mut [usize; MAXN * 3], a: usize, b: usize) {
+    let ra = find3(parent, a);
+    let rb = find3(parent, b);
+    if ra != rb {
+        parent[ra] = rb;
     }
 }

@@ -11,17 +11,16 @@ pub mod rules;
 
 pub use rules::Style;
 
-/// Count valid American-style n×n grids (OEIS A323839).
-///
-/// Currently backed by the brute-force oracle (intended for n ≤ 9); the
-/// transfer-matrix DP replaces this in a later milestone.
+/// Count valid American-style n×n grids (OEIS A323839) via the transfer-matrix
+/// DP. Validated against the published counts through 13×13.
 pub fn count_american(n: usize) -> u128 {
-    brute::count(n, Style::American)
+    dp::count_sym(n, Style::American)
 }
 
 /// Count valid British-style n×n grids (Keith, G4G16).
 ///
-/// Currently backed by the brute-force oracle (intended for n ≤ 9).
+/// The DP's British word rules are not yet complete (M4), so this is currently
+/// backed by the brute-force oracle (intended for n ≤ 9).
 pub fn count_british(n: usize) -> u128 {
     brute::count(n, Style::British)
 }
