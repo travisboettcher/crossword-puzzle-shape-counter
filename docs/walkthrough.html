@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Counting crossword grids — a visual walkthrough</title>
+<style>
+  :root {
+    --paper:#f5f4ef; --panel:#fffdf9; --ink:#1a1c22; --ink-soft:#585c69;
+    --line:#e0ddd4; --line-strong:#cbc7bb;
+    --accent:#2f43c8; --accent-soft:rgba(47,67,200,.10); --accent-line:#2f43c8;
+    --ok:#1f7a54; --bad:#b23a4c;
+    --comp-1:#1f9d6b; --comp-1-bg:rgba(31,157,107,.16);
+    --comp-2:#cf862a; --comp-2-bg:rgba(207,134,42,.16);
+    --comp-3:#7a52d6; --comp-3-bg:rgba(122,82,214,.16);
+    --cell-white:#ffffff; --cell-white-line:#c9c5ba;
+    --cell-black:#282b34;
+    --font-serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+    --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --maxw:60rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0e1014; --panel:#171a21; --ink:#e9eaee; --ink-soft:#9aa1af;
+      --line:#282c35; --line-strong:#3a3f4b;
+      --accent:#8ea0ff; --accent-soft:rgba(142,160,255,.14); --accent-line:#8ea0ff;
+      --ok:#4bbd8a; --bad:#e2788a;
+      --comp-1:#41c491; --comp-1-bg:rgba(65,196,145,.18);
+      --comp-2:#e6a44f; --comp-2-bg:rgba(230,164,79,.18);
+      --comp-3:#a487f2; --comp-3-bg:rgba(164,135,242,.18);
+      --cell-white:#eef0f4; --cell-white-line:#c3c7d0;
+      --cell-black:#04050a;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper:#f5f4ef; --panel:#fffdf9; --ink:#1a1c22; --ink-soft:#585c69;
+    --line:#e0ddd4; --line-strong:#cbc7bb; --accent:#2f43c8; --accent-soft:rgba(47,67,200,.10);
+    --accent-line:#2f43c8; --ok:#1f7a54; --bad:#b23a4c;
+    --comp-1:#1f9d6b; --comp-1-bg:rgba(31,157,107,.16);
+    --comp-2:#cf862a; --comp-2-bg:rgba(207,134,42,.16);
+    --comp-3:#7a52d6; --comp-3-bg:rgba(122,82,214,.16);
+    --cell-white:#ffffff; --cell-white-line:#c9c5ba; --cell-black:#282b34;
+  }
+  :root[data-theme="dark"] {
+    --paper:#0e1014; --panel:#171a21; --ink:#e9eaee; --ink-soft:#9aa1af;
+    --line:#282c35; --line-strong:#3a3f4b; --accent:#8ea0ff; --accent-soft:rgba(142,160,255,.14);
+    --accent-line:#8ea0ff; --ok:#4bbd8a; --bad:#e2788a;
+    --comp-1:#41c491; --comp-1-bg:rgba(65,196,145,.18);
+    --comp-2:#e6a44f; --comp-2-bg:rgba(230,164,79,.18);
+    --comp-3:#a487f2; --comp-3-bg:rgba(164,135,242,.18);
+    --cell-white:#eef0f4; --cell-white-line:#c3c7d0; --cell-black:#04050a;
+  }
+
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--font-sans); font-size:17px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:var(--maxw); margin:0 auto; padding:0 1.25rem; }
+  section { padding:3.25rem 0; border-top:1px solid var(--line); }
+  section:first-of-type { border-top:none; }
+
+  h1,h2,h3 { font-family:var(--font-serif); font-weight:600; text-wrap:balance; line-height:1.15; margin:0; }
+  h1 { font-size:clamp(2rem,5vw,3.1rem); letter-spacing:-.01em; }
+  h2 { font-size:clamp(1.4rem,3.2vw,2rem); margin-bottom:.9rem; }
+  h3 { font-size:1.1rem; }
+  p { margin:0 0 1rem; max-width:62ch; }
+  a { color:var(--accent); text-underline-offset:3px; }
+  .eyebrow {
+    font-family:var(--font-mono); font-size:.72rem; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--accent); margin:0 0 .7rem;
+  }
+  .lede { font-size:1.15rem; color:var(--ink-soft); max-width:60ch; }
+  code, .mono { font-family:var(--font-mono); }
+  code { background:var(--accent-soft); padding:.08em .35em; border-radius:4px; font-size:.88em; }
+
+  /* header */
+  header.hero { padding:4rem 0 2.75rem; }
+  header.hero .grid-badge { margin-bottom:1.6rem; }
+  header.hero p.lede { margin-top:1.1rem; }
+  .meta { font-family:var(--font-mono); font-size:.8rem; color:var(--ink-soft); margin-top:1.4rem; }
+  .meta a { color:var(--ink-soft); }
+
+  /* crossword grid */
+  .board { display:inline-grid; gap:2px; background:var(--line-strong);
+           padding:2px; border-radius:4px; }
+  .cell {
+    width:var(--cs,30px); height:var(--cs,30px);
+    display:flex; align-items:center; justify-content:center;
+    background:var(--cell-white); position:relative;
+    transition:background .18s ease, transform .18s ease, opacity .18s ease;
+  }
+  .cell.black { background:var(--cell-black); }
+  .cell.empty { background:transparent; box-shadow:inset 0 0 0 1px var(--line); }
+  .cell.pop { animation:pop .28s ease; }
+  @keyframes pop { from { transform:scale(.6); opacity:0; } to { transform:scale(1); opacity:1; } }
+  .cell .dot {
+    position:absolute; top:3px; right:3px; width:7px; height:7px; border-radius:50%;
+  }
+  .cell.frontier { box-shadow:inset 0 -3px 0 0 var(--accent-line); }
+  .board.folded .cell.mirror { opacity:.62; }
+  .board.folded .cell.centerrow { box-shadow:inset 0 0 0 2px var(--accent-line); }
+
+  /* stage */
+  .stage {
+    display:grid; grid-template-columns:auto 1fr; gap:1.75rem 2.25rem;
+    align-items:start; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:1.6rem; margin-top:1.5rem;
+  }
+  @media (max-width:680px){ .stage { grid-template-columns:1fr; } }
+  .stage .left { display:flex; flex-direction:column; gap:.75rem; align-items:center; }
+
+  /* frontier strip */
+  .frontier-wrap { display:flex; flex-direction:column; gap:.4rem; align-items:center; }
+  .flabel { font-family:var(--font-mono); font-size:.68rem; letter-spacing:.12em;
+            text-transform:uppercase; color:var(--ink-soft); }
+  .strip { display:inline-grid; gap:2px; }
+  .tile {
+    width:var(--cs,30px); height:22px; border-radius:3px;
+    display:flex; align-items:center; justify-content:center;
+    font-family:var(--font-mono); font-size:.8rem; font-weight:600;
+    background:var(--line); color:var(--ink-soft);
+    border:1px solid transparent;
+  }
+  .tile.c1 { background:var(--comp-1-bg); color:var(--comp-1); border-color:var(--comp-1); }
+  .tile.c2 { background:var(--comp-2-bg); color:var(--comp-2); border-color:var(--comp-2); }
+  .tile.c3 { background:var(--comp-3-bg); color:var(--comp-3); border-color:var(--comp-3); }
+  .tile.blk { background:var(--cell-black); color:transparent; }
+  .tile.forced { outline:2px dashed var(--accent); outline-offset:1px; }
+
+  /* narration */
+  .narr { min-height:9.5rem; }
+  .step-tag { font-family:var(--font-mono); font-size:.72rem; letter-spacing:.14em;
+              text-transform:uppercase; color:var(--accent); }
+  .narr h3 { margin:.35rem 0 .5rem; }
+  .narr p { font-size:1rem; margin-bottom:.7rem; }
+  .verdict { font-family:var(--font-mono); font-weight:700; font-size:1.05rem; }
+  .verdict.ok { color:var(--ok); } .verdict.bad { color:var(--bad); }
+
+  /* controls */
+  .controls { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap;
+              margin-top:1.4rem; grid-column:1 / -1; }
+  button {
+    font-family:var(--font-sans); font-size:.92rem; font-weight:550;
+    padding:.5rem .95rem; border-radius:7px; border:1px solid var(--line-strong);
+    background:var(--panel); color:var(--ink); cursor:pointer;
+    transition:background .15s, border-color .15s, transform .05s;
+  }
+  button:hover { border-color:var(--accent); }
+  button:active { transform:translateY(1px); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  @media (prefers-color-scheme: dark){ button.primary { color:#0e1014; } }
+  :root[data-theme="dark"] button.primary { color:#0e1014; }
+  :root[data-theme="light"] button.primary { color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .stepdots { display:flex; gap:.35rem; margin-left:.4rem; }
+  .stepdots i { width:8px; height:8px; border-radius:50%; background:var(--line-strong); }
+  .stepdots i.on { background:var(--accent); }
+
+  /* legend */
+  .legend { display:flex; flex-wrap:wrap; gap:.5rem 1.1rem; margin-top:1rem;
+            font-family:var(--font-mono); font-size:.76rem; color:var(--ink-soft); }
+  .legend span { display:inline-flex; align-items:center; gap:.4rem; }
+  .sw { width:13px; height:13px; border-radius:3px; border:1px solid var(--line-strong); }
+
+  /* two-up diagram (merge) */
+  .twoup { display:flex; gap:1.25rem 2rem; align-items:center; flex-wrap:wrap;
+           margin-top:1.5rem; }
+  .twoup .col { display:flex; flex-direction:column; align-items:center; gap:.5rem; }
+  .twoup .op { font-family:var(--font-serif); font-size:1.8rem; color:var(--ink-soft); }
+  .caption { font-family:var(--font-mono); font-size:.75rem; color:var(--ink-soft);
+             text-align:center; max-width:16ch; }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
+           gap:1rem; margin-top:1.4rem; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:1.1rem 1.15rem; }
+  .card h3 { font-family:var(--font-mono); font-size:.8rem; letter-spacing:.06em;
+             text-transform:uppercase; color:var(--accent); margin-bottom:.5rem; }
+  .card p { font-size:.95rem; margin-bottom:0; }
+
+  footer { border-top:1px solid var(--line); padding:2.25rem 0 3rem; color:var(--ink-soft);
+           font-size:.9rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation:none !important; transition:none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="grid-badge" id="heroGrid"></div>
+    <p class="eyebrow">Transfer-matrix counting · a visual walkthrough</p>
+    <h1>How to count every crossword grid without listing a single one</h1>
+    <p class="lede">There are 404,139,015,237,875 valid 15×15 American grids. You can’t enumerate them.
+      But you can sweep down the grid one row at a time, merging every partial grid that looks the
+      same at the boundary — and count them all at once.</p>
+    <p class="meta">Companion to <a href="../README.md">the README</a> ·
+      code in <span class="mono">src/dp.rs</span> &amp; <span class="mono">src/british.rs</span></p>
+  </header>
+</div>
+
+<div class="wrap">
+<section>
+  <p class="eyebrow">The object</p>
+  <h2>A grid is a pattern of black &amp; white squares</h2>
+  <p>We’re counting the <em>shapes</em> — where the black squares go — not the letters. A grid is
+    valid (American style) when it has 180° rotational symmetry, every white run across and down is
+    at least 3 long, and all the white squares form one connected region.</p>
+  <div class="twoup">
+    <div class="col"><div id="exGood"></div><div class="caption" style="color:var(--ok)">valid</div></div>
+    <div class="col"><div id="exBad1"></div><div class="caption" style="color:var(--bad)">run of 2 · too short</div></div>
+    <div class="col"><div id="exBad2"></div><div class="caption" style="color:var(--bad)">white split in two</div></div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">The idea · step through it</p>
+  <h2>Sweep down row by row, carrying only the boundary</h2>
+  <p>As we place each row, the only thing the future cares about is the <strong>frontier</strong> —
+    the last row placed. For each column we remember two things: how long its vertical white run is
+    (capped at 3, since “3 or more” all behave the same) and <strong>which columns are connected</strong>
+    to each other through the white cells already placed. Colours below mark connected components.</p>
+
+  <div class="stage">
+    <div class="left">
+      <div id="dpBoard"></div>
+      <div class="frontier-wrap">
+        <div class="flabel">frontier state — run length · component</div>
+        <div class="strip" id="dpStrip"></div>
+      </div>
+    </div>
+    <div class="narr" id="dpNarr"></div>
+    <div class="controls">
+      <button id="btnPrev">◀ Back</button>
+      <button id="btnNext" class="primary">Next ▶</button>
+      <button id="btnReset">Reset</button>
+      <div class="stepdots" id="dots" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--cell-white)"></span> white cell</span>
+    <span><span class="sw" style="background:var(--cell-black)"></span> black cell</span>
+    <span><span class="sw" style="background:var(--comp-1-bg);border-color:var(--comp-1)"></span> component</span>
+    <span><span class="sw" style="border:2px dashed var(--accent)"></span> forced white next row (run &lt; 3)</span>
+    <span><span class="sw" style="box-shadow:inset 0 -3px 0 var(--accent-line);background:var(--cell-white)"></span> frontier row</span>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">Why it’s fast</p>
+  <h2>Two different fillings, one frontier — counted together</h2>
+  <p>Because vertical runs are capped at 3, a column that’s been white for four rows looks exactly
+    like one that’s been white for three. So these two <em>different</em> partial grids arrive at an
+    <strong>identical</strong> frontier. The DP stores that frontier once and adds their counts. This
+    is how 10³⁰ grids collapse into a few million boundary states.</p>
+  <div class="twoup" id="mergeRow">
+    <div class="col"><div id="mergeA"></div><div class="caption">filling A · count 1</div></div>
+    <div class="op">＋</div>
+    <div class="col"><div id="mergeB"></div><div class="caption">filling B · count 1</div></div>
+    <div class="op">＝</div>
+    <div class="col">
+      <div class="frontier-wrap">
+        <div class="flabel">same frontier</div>
+        <div class="strip" id="mergeStrip"></div>
+      </div>
+      <div class="caption" style="color:var(--accent)">stored once · count 2</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">The symmetry trick</p>
+  <h2>Build the top half, mirror it, glue at the center</h2>
+  <p>Every valid grid is its own 180° rotation, so we only ever build the top half. At the center
+    row we fold: each frontier is glued to its own reflection. The vertical run through a column
+    becomes <span class="mono">top + center + mirror</span>, which must still be ≥ 3, and the top and
+    bottom components must merge into one region. This gluing step is the fiddliest part of the whole
+    algorithm — the place bugs love to hide.</p>
+  <div class="stage" style="grid-template-columns:auto 1fr;">
+    <div class="left"><div id="glueBoard"></div></div>
+    <div class="narr">
+      <p class="mono" style="color:var(--ink-soft);font-size:.8rem;letter-spacing:.1em;text-transform:uppercase">at the center row</p>
+      <p>The lower half (faded) is forced — it’s the exact 180° image of the top. Column 3’s run is
+        <span class="mono">2 (top) + 1 (center) + 2 (mirror) = 5</span> ✓. Columns 0 and 6 close at the
+        center against a black square, with runs of 3 ✓. All the white merges into a single component.</p>
+      <p class="verdict ok">✓ valid — the whole equivalence class is counted at once</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">The British variant</p>
+  <h2>Cryptic grids add word rules — checked every other letter</h2>
+  <p>British grids drop “every letter checked” and instead require each word of length <em>k</em> to
+    have exactly ⌈k/2⌉ <strong>checked</strong> letters (cells crossed by a word both ways), with no
+    run of three unchecked in a row. That’s what gives the classic lattice look:</p>
+  <div style="margin:1.25rem 0"><div id="britGrid"></div></div>
+  <div class="cards">
+    <div class="card"><h3>Checked = has a neighbour</h3>
+      <p>Since length-2 runs are banned, a cell is checked exactly when it has a white perpendicular
+        neighbour — so the rule can be tested locally as the sweep passes.</p></div>
+    <div class="card"><h3>A tiny per-column tally</h3>
+      <p>Each open vertical run carries just three numbers — capped length, checked-minus-unchecked
+        balance, and trailing unchecked count — enough to validate the word at closure.</p></div>
+    <div class="card"><h3>Same skeleton</h3>
+      <p>Connectivity, symmetry folding and center gluing are identical to the American case; only the
+        run bookkeeping changes.</p></div>
+  </div>
+</section>
+</div>
+
+<div class="wrap">
+  <footer>
+    <p style="margin:0">Reproduces OEIS A323839 (American, through 15×15) and Michael Keith’s G4G16
+      counts (British, through 11×11). See the <a href="../README.md">README</a> for the full results
+      and validation ladder.</p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const W = ".", B = "#";
+
+  // ---- a valid 7x7 American example (symmetric, runs>=3, connected) ----
+  const EX = ["...#...",".......",".......","#.....#",".......",".......","...#..."];
+  const N = 7, H = 3; // center row index
+
+  function makeBoard(rows, opts){
+    opts = opts || {};
+    const cs = opts.cs || 30;
+    const el = document.createElement("div");
+    el.className = "board" + (opts.folded ? " folded" : "");
+    el.style.setProperty("--cs", cs + "px");
+    el.style.gridTemplateColumns = `repeat(${rows[0].length}, ${cs}px)`;
+    for(let i=0;i<rows.length;i++){
+      for(let j=0;j<rows[i].length;j++){
+        const c = document.createElement("div");
+        const ch = rows[i][j];
+        c.className = "cell" + (ch===B?" black":ch===" "?" empty":"");
+        if(opts.mirrorFrom!==undefined && i>opts.mirrorFrom) c.classList.add("mirror");
+        if(opts.centerRow===i) c.classList.add("centerrow");
+        if(opts.frontierRow===i && ch===W) c.classList.add("frontier");
+        el.appendChild(c);
+      }
+    }
+    return el;
+  }
+
+  // Flood-fill connected white components over placed rows; return {comp, vcap, labels}
+  function frontier(placed){
+    const r = placed.length - 1, n = placed[0].length;
+    const white = (i,j)=> i>=0 && i<placed.length && placed[i][j]===W;
+    const comp = placed.map(row=>row.split("").map(_=>-1));
+    let id=0;
+    for(let i=0;i<placed.length;i++) for(let j=0;j<n;j++){
+      if(white(i,j) && comp[i][j]===-1){
+        const stack=[[i,j]]; comp[i][j]=id;
+        while(stack.length){
+          const [a,b]=stack.pop();
+          [[a-1,b],[a+1,b],[a,b-1],[a,b+1]].forEach(([x,y])=>{
+            if(white(x,y) && comp[x][y]===-1){ comp[x][y]=id; stack.push([x,y]); }
+          });
+        }
+        id++;
+      }
+    }
+    // frontier row: vcap + canonical label per column
+    const vcap=[], rawlabel=[];
+    for(let j=0;j<n;j++){
+      if(!white(r,j)){ vcap.push(0); rawlabel.push(-1); continue; }
+      let len=0; while(white(r-len,j)) len++;
+      vcap.push(Math.min(len,3));
+      rawlabel.push(comp[r][j]);
+    }
+    const map={}; let next=1; const label=rawlabel.map(x=>{
+      if(x<0) return 0;
+      if(!(x in map)) map[x]=next++;
+      return map[x];
+    });
+    return {vcap, label, ncomp: Object.keys(map).length};
+  }
+
+  function makeStrip(fr, cs){
+    cs = cs || 30;
+    const s=document.createElement("div");
+    s.className="strip"; s.style.gridTemplateColumns=`repeat(${fr.vcap.length}, ${cs}px)`;
+    for(let j=0;j<fr.vcap.length;j++){
+      const t=document.createElement("div");
+      if(fr.vcap[j]===0){ t.className="tile blk"; t.textContent="·"; }
+      else {
+        t.className="tile c"+fr.label[j];
+        t.textContent = fr.vcap[j]===3 ? "3+" : String(fr.vcap[j]);
+        if(fr.vcap[j]<3) t.classList.add("forced");
+      }
+      s.appendChild(t);
+    }
+    return s;
+  }
+
+  // ---------- static examples ----------
+  document.getElementById("heroGrid").appendChild(makeBoard(EX, {cs:26}));
+  document.getElementById("exGood").appendChild(makeBoard(EX, {cs:22}));
+  document.getElementById("exBad1").appendChild(makeBoard(
+    ["..#.#..",".......",".......","#.....#",".......",".......","..#.#.."], {cs:22}));
+  document.getElementById("exBad2").appendChild(makeBoard(
+    ["...#...","...#...","...#...","#######","...#...","...#...","...#..."], {cs:22}));
+
+  // British lattice example (illustrative shape)
+  document.getElementById("britGrid").appendChild(makeBoard(
+    [".#.#.#.",".......","#.#.#.#",".......","#.#.#.#",".......",".#.#.#."], {cs:26}));
+
+  // ---------- merge illustration (4 tall, 7 wide) ----------
+  // Both fillings reach the same frontier: every column white for >=3 rows caps at "3+".
+  const fillA = [".......", ".......", ".......", "......."];        // solid white
+  const fillB = ["...#...", ".......", ".......", "......."];        // one black square up top
+  document.getElementById("mergeA").appendChild(makeBoard(fillA, {cs:22, frontierRow:3}));
+  document.getElementById("mergeB").appendChild(makeBoard(fillB, {cs:22, frontierRow:3}));
+  document.getElementById("mergeStrip").appendChild(makeStrip(frontier(fillA), 22));
+
+  // ---------- glue illustration (full folded grid) ----------
+  document.getElementById("glueBoard").appendChild(
+    makeBoard(EX, {cs:30, folded:true, mirrorFrom:H, centerRow:H, frontierRow:H-1}));
+
+  // ---------- interactive stepper ----------
+  const steps = [
+    { rows:0, tag:"Start", h:"An empty frontier",
+      p:["Nothing placed yet. We’ll add the top half one row at a time and watch the boundary state."] },
+    { rows:1, tag:"Row 0", h:"A black square splits the row",
+      p:["The black square at column 3 breaks row 0 into two white runs — two separate components, "
+        +"shown in different colours. Every vertical run is length 1 so far."] },
+    { rows:2, tag:"Row 1", h:"An all-white row bridges the gap",
+      p:["Row 1 is solid white. It links every column downward and, crucially, joins the two runs "
+        +"across column 3 — the components merge into one. Column 3’s run just restarted at length 1, "
+        +"so it’s dashed: it’s forced to stay white next row, or it would close as an illegal short run."] },
+    { rows:3, tag:"Row 2", h:"Runs reach the safe length",
+      p:["Row 2, all white again. Most runs hit the 3+ cap; column 3 is at 2. This frontier — the "
+        +"run-lengths plus the single merged component — is the entire summary the center step needs."] },
+    { rows:-1, tag:"Fold", h:"Mirror the top, glue at the center",
+      p:["The bottom half is the exact 180° image of the top, so we don’t build it — we glue. "
+        +"Column 3’s run spans 2 + 1 (center) + 2 = 5 ✓; columns 0 and 6 close at length 3 ✓; "
+        +"everything stays one component."],
+      verdict:"✓ valid — counted" },
+  ];
+  let idx = 0;
+  const board = document.getElementById("dpBoard");
+  const strip = document.getElementById("dpStrip");
+  const narr  = document.getElementById("dpNarr");
+  const dots  = document.getElementById("dots");
+  steps.forEach((_,k)=>{ const d=document.createElement("i"); if(k===0)d.className="on"; dots.appendChild(d); });
+
+  function blankRows(k){ // first k rows of EX, rest as empty placeholders (top half + center context)
+    const out=[];
+    for(let i=0;i<N;i++){
+      if(i<k) out.push(EX[i]);
+      else out.push(" ".repeat(N));
+    }
+    return out;
+  }
+
+  function render(){
+    const st = steps[idx];
+    board.innerHTML=""; strip.innerHTML="";
+    if(st.rows === -1){
+      // folded full grid
+      board.appendChild(makeBoard(EX, {cs:30, folded:true, mirrorFrom:H, centerRow:H, frontierRow:H-1}));
+      const fr = frontier(EX.slice(0,H)); // top-half frontier
+      strip.appendChild(makeStrip(fr, 30));
+    } else if(st.rows === 0){
+      board.appendChild(makeBoard(blankRows(0), {cs:30}));
+    } else {
+      const rows = blankRows(st.rows).map((r,i)=> r);
+      board.appendChild(makeBoard(rows, {cs:30, frontierRow:st.rows-1}));
+      const fr = frontier(EX.slice(0, st.rows));
+      strip.appendChild(makeStrip(fr, 30));
+    }
+    // pop-in the freshly placed / revealed row
+    const cells = board.querySelectorAll(".cell");
+    if(st.rows>0){ const start=(st.rows-1)*N; for(let k=0;k<N;k++){ const c=cells[start+k]; if(c && !c.classList.contains("empty")) c.classList.add("pop"); } }
+
+    narr.innerHTML = `<div class="step-tag">${st.tag} · step ${idx} / ${steps.length-1}</div>`+
+      `<h3>${st.h}</h3>` + st.p.map(x=>`<p>${x}</p>`).join("") +
+      (st.verdict?`<p class="verdict ok">${st.verdict}</p>`:"");
+    dots.querySelectorAll("i").forEach((d,k)=> d.className = k===idx?"on":"");
+    document.getElementById("btnPrev").disabled = idx===0;
+    document.getElementById("btnNext").disabled = idx===steps.length-1;
+  }
+  document.getElementById("btnNext").onclick = ()=>{ if(idx<steps.length-1){idx++;render();} };
+  document.getElementById("btnPrev").onclick = ()=>{ if(idx>0){idx--;render();} };
+  document.getElementById("btnReset").onclick = ()=>{ idx=0; render(); };
+  render();
+})();
+</script>
+</body>
+</html>

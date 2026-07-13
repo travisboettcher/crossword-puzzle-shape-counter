@@ -28,6 +28,10 @@ checked letters (Rule 6); no 3 consecutive unchecked letters (Rule 7); and no
 
 ## Method
 
+> **New here?** [`docs/walkthrough.html`](docs/walkthrough.html) is an interactive,
+> step-through visualization of everything below — open it in a browser to watch the
+> frontier sweep down a grid, merge, fold, and glue at the center.
+
 The grid is built one row at a time. Two partial grids that look identical along
 the current **frontier** (the last row placed) are interchangeable for every
 future decision, so they are merged and a count is carried — collapsing an
