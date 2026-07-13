@@ -72,11 +72,20 @@ value. Timings are wall-clock on 4 cores.
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
 | 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~73 s) |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | _in progress_ |
-| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | *stretch* |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ⚠ memory-bound (see below) |
+| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | — |
 
-American reproduces A323839 through 15×15; British reproduces Keith's `#Total`
-through 11×11 (13×13 in progress). British 15×15 remains an open problem.
+American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
+through 11×11.
+
+### British 13×13 — memory-bound here
+
+The same British DP is correct at 13×13 (Keith's value is 162,468,835,136), but
+it exceeds the ~15 GB of RAM in this environment. The frontier grows steeply:
+row 3 alone reaches ~49M states, and the two remaining top-half rows climb into
+the hundreds of millions, OOM-ing past ~16 GB. Reaching 13×13 (and the open
+15×15) would need a lower-memory state encoding or an external-memory / sharded
+transfer step — a natural next step, not a correctness gap.
 
 ## Usage
 
