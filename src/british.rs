@@ -10,17 +10,23 @@
 //! (horizontal runs by [`allowed_rows`], vertical runs at closure), a cell is
 //! checked iff it merely has a white perpendicular neighbour. So:
 //!   * **Horizontal** words of row `i` are validated one step late — when row
-//!     `i+1` is placed we know both vertical neighbours of every cell in row `i`.
-//!   * **Vertical** words are validated at their closure by carrying, per open
-//!     column run, the sequence of checked bits (each cell's "has a horizontal
-//!     neighbour"). Validation reuses [`word_checks_ok`].
+//!     `i+1` is placed we know both vertical neighbours of every cell in row `i`,
+//!     and the full row pattern is known, so [`word_checks_ok`] applies directly.
+//!   * **Vertical** words are validated at their closure. Rather than store each
+//!     open run's full checked-bit pattern (which explodes the state count), we
+//!     carry only its **minimal sufficient statistic**: the capped length, the
+//!     running balance `d = #checked − #unchecked`, and the trailing count of
+//!     consecutive unchecked cells. Rules 7 (no 3 unchecked) and the Rule-8 start
+//!     constraint are enforced during growth; Rule 6 (`d ∈ {0,1}`) and the Rule-8
+//!     end constraint (`trailing < 2`) are checked at closure. This is exact —
+//!     two runs with the same statistic have identical future validity — and
+//!     collapses the state space enough for 11×11 and 13×13 to fit in memory.
 //!
 //! ## Frontier state (per column, packed into a u16)
-//!   * `label` (bits 12..16): connectivity id, canonicalized (0 = black).
-//!   * `len`   (bits 8..12): length of the open vertical white run (0 = black),
-//!     capped by the half-height `h ≤ 7`.
-//!   * `bits`  (bits 0..8): checked bit of each cell of the run; bit 0 is the
-//!     topmost cell, bit `len-1` the frontier cell.
+//!   * `len`   (bits 0..2): capped run length (0 = black, else 1, 2, or 3=">=3").
+//!   * `trail` (bits 2..4): trailing consecutive-unchecked count (0, 1, 2).
+//!   * `d`     (bits 4..8): `#checked − #unchecked`, stored as `d + DBIAS`.
+//!   * `label` (bits 8..12): connectivity id, canonicalized.
 //! Plus a flag u16 (`e0 | eN<<1`) for the Rule-4 edge columns.
 
 use ahash::AHashMap;
@@ -30,45 +36,96 @@ use crate::rules::{word_checks_ok, Style};
 
 const MAXN: usize = 15;
 const SLOTS: usize = MAXN + 1;
+const DBIAS: i8 = 4;
 
 type Key = [u16; SLOTS];
 type Map = AHashMap<Key, u128>;
 
 #[inline]
-fn pack_col(label: u8, len: u8, bits: u8) -> u16 {
-    ((label as u16) << 12) | ((len as u16) << 8) | bits as u16
-}
-#[inline]
-fn col_label(c: u16) -> u8 {
-    (c >> 12) as u8
+fn pack_col(label: u8, len: u8, trail: u8, d: i8) -> u16 {
+    (len as u16) | ((trail as u16) << 2) | (((d + DBIAS) as u16) << 4) | ((label as u16) << 8)
 }
 #[inline]
 fn col_len(c: u16) -> u8 {
+    (c & 0b11) as u8
+}
+#[inline]
+fn col_trail(c: u16) -> u8 {
+    ((c >> 2) & 0b11) as u8
+}
+#[inline]
+fn col_d(c: u16) -> i8 {
+    (((c >> 4) & 0xf) as i8) - DBIAS
+}
+#[inline]
+fn col_label(c: u16) -> u8 {
     ((c >> 8) & 0xf) as u8
 }
-#[inline]
-fn col_bits(c: u16) -> u8 {
-    (c & 0xff) as u8
-}
 
-/// Expand the stored run into its checked-bit sequence (top cell first).
+/// Validate a completed **vertical** run from its sufficient statistic.
+/// `len` is capped (1, 2, 3=">=3"), `trail` the trailing-unchecked count, `d`
+/// the checked−unchecked balance. (Rules 7 and the Rule-8 start are enforced
+/// during growth.)
 #[inline]
-fn run_pattern(c: u16, out: &mut [bool; 16]) -> usize {
-    let len = col_len(c) as usize;
-    let bits = col_bits(c);
-    for (t, o) in out.iter_mut().enumerate().take(len) {
-        *o = (bits >> t) & 1 == 1;
+fn vrun_close_ok(len: u8, trail: u8, d: i8) -> bool {
+    match len {
+        0 => true,
+        1 => d == 1,                          // a lone cell must be checked
+        2 => false,                           // length-2 word forbidden
+        _ => (d == 0 || d == 1) && trail < 2, // Rule 6 + Rule-8 end
     }
-    len
 }
 
-/// Validate one completed vertical run against Rule 3 + British Rules 6–8.
-/// `pat` holds the checked bit of each cell (top to bottom).
-fn vrun_word_ok(pat: &[bool]) -> bool {
+/// Validate a **vertical** word that crosses the center: top run `(lj,tj,dj)`,
+/// mirrored bottom run `(lm,tm,dm)`, and the center cell (checked = `cc`).
+#[allow(clippy::too_many_arguments)]
+fn vrun_cross_ok(lj: u8, tj: u8, dj: i8, lm: u8, tm: u8, dm: i8, cc: bool) -> bool {
+    // Empty sides contribute nothing.
+    let (tj, dj) = if lj > 0 { (tj, dj) } else { (0, 0) };
+    let (tm, dm) = if lm > 0 { (tm, dm) } else { (0, 0) };
+
+    if lj == 0 && lm == 0 {
+        return cc; // word is the single center cell; it must be checked
+    }
+    if lj + lm == 1 {
+        return false; // total length 2
+    }
+
+    // total length >= 3
+    let d_total = dj as i32 + dm as i32 + if cc { 1 } else { -1 };
+    if d_total != 0 && d_total != 1 {
+        return false; // Rule 6
+    }
+    // Rule 7 across the center (only an issue when the center is unchecked).
+    if !cc && (tj + 1 + tm) >= 3 {
+        return false;
+    }
+    // Rule 8 start (top of the word).
+    if lj == 0 {
+        if !cc && tm >= 1 {
+            return false; // center + first bottom cell both unchecked
+        }
+    } else if lj == 1 && dj == -1 && !cc {
+        return false; // lone unchecked top cell + unchecked center
+    }
+    // Rule 8 end (bottom of the word).
+    if lm == 0 {
+        if !cc && tj >= 1 {
+            return false;
+        }
+    } else if lm == 1 && dm == -1 && !cc {
+        return false;
+    }
+    true
+}
+
+/// Validate a completed **horizontal** word from its full checked pattern.
+#[inline]
+fn hword_ok(pat: &[bool]) -> bool {
     match pat.len() {
         0 => true,
-        1 => pat[0], // a lone cell must be checked by its horizontal word
-        2 => false,  // length-2 word forbidden (Rule 3)
+        1 => pat[0],
+        2 => false,
         _ => word_checks_ok(Style::British, pat),
     }
 }
@@ -132,7 +189,7 @@ fn hrow_ok(mask: u32, n: usize, checked_v: &[bool; MAXN]) -> bool {
                 j += 1;
             }
             let pat: Vec<bool> = (s..j).map(|c| checked_v[c]).collect();
-            if !vrun_word_ok(&pat) {
+            if !hword_ok(&pat) {
                 return false;
             }
         } else {
@@ -143,20 +200,16 @@ fn hrow_ok(mask: u32, n: usize, checked_v: &[bool; MAXN]) -> bool {
 }
 
 /// Place row `w` (row `i+1`) onto frontier `key` (row `i`).
-/// First validates row `i`'s horizontal words (now that its lower neighbour is
-/// known), then closes/extends vertical runs and updates connectivity.
 fn step(key: &Key, w: u32, n: usize) -> Option<Key> {
     let old = key;
     let white = |j: usize| (w >> j) & 1 == 1;
 
-    // --- validate row i's horizontal words -------------------------------
-    // row i's white pattern is the set of columns with an open run.
+    // Validate row i's horizontal words (its lower neighbour is now known).
     let mut row_i_mask: u32 = 0;
     let mut checked_v = [false; MAXN];
     for j in 0..n {
         if col_len(old[j]) > 0 {
             row_i_mask |= 1 << j;
-            // checked in vertical direction: white above (run len >= 2) or below.
             checked_v[j] = col_len(old[j]) >= 2 || white(j);
         }
     }
@@ -164,18 +217,17 @@ fn step(key: &Key, w: u32, n: usize) -> Option<Key> {
         return None;
     }
 
-    // --- vertical runs: close (white->black) or extend (white below) ------
-    let mut pat = [false; 16];
+    // Vertical runs that close now (white above, black below).
     for j in 0..n {
-        if col_len(old[j]) > 0 && !white(j) {
-            let len = run_pattern(old[j], &mut pat);
-            if !vrun_word_ok(&pat[..len]) {
-                return None;
-            }
+        if col_len(old[j]) > 0
+            && !white(j)
+            && !vrun_close_ok(col_len(old[j]), col_trail(old[j]), col_d(old[j]))
+        {
+            return None;
         }
     }
 
-    // --- connectivity: union-find over new-row white columns -------------
+    // Connectivity: union-find over the new row's white columns.
     let mut parent = [0usize; MAXN];
     for (j, p) in parent.iter_mut().enumerate().take(n) {
         *p = j;
@@ -196,14 +248,13 @@ fn step(key: &Key, w: u32, n: usize) -> Option<Key> {
             }
         }
     }
-    // reject any old component sealed off mid-grid
     for j in 0..n {
         if col_len(old[j]) > 0 && first_below[col_label(old[j]) as usize] == usize::MAX {
-            return None;
+            return None; // component sealed off mid-grid
         }
     }
 
-    // --- build new frontier ----------------------------------------------
+    // Build the new frontier, updating each column's vertical-run statistic.
     let mut out = [0u16; SLOTS];
     let mut root_label = [0u8; MAXN];
     let mut next_label = 1u8;
@@ -215,12 +266,27 @@ fn step(key: &Key, w: u32, n: usize) -> Option<Key> {
                 next_label += 1;
             }
             let label = root_label[r];
-            // checked bit of this new cell (row i+1) = has horizontal neighbour
+            // checked bit of this new cell = has a horizontal neighbour
             let ch = (j > 0 && white(j - 1)) || (j + 1 < n && white(j + 1));
-            let (old_len, old_bits) = (col_len(old[j]), col_bits(old[j]));
-            let new_len = (old_len + 1).min(15);
-            let new_bits = old_bits | ((ch as u8) << old_len);
-            out[j] = pack_col(label, new_len, new_bits);
+            let (new_len, new_trail, new_d) = if col_len(old[j]) == 0 {
+                // fresh run
+                (1u8, if ch { 0 } else { 1 }, if ch { 1 } else { -1 })
+            } else {
+                let (ol, ot, od) = (col_len(old[j]), col_trail(old[j]), col_d(old[j]));
+                if ch {
+                    ((ol + 1).min(3), 0, od + 1)
+                } else {
+                    let nt = ot + 1;
+                    if nt >= 3 {
+                        return None; // Rule 7: three consecutive unchecked
+                    }
+                    if ol == 1 && ot == 1 {
+                        return None; // Rule 8 start: unchecked pair at word start
+                    }
+                    ((ol + 1).min(3), nt, od - 1)
+                }
+            };
+            out[j] = pack_col(label, new_len, new_trail, new_d);
         }
     }
     let mut flags = old[n];
@@ -244,7 +310,7 @@ fn advance(map: Map, rows: &[u32], n: usize, first_row: bool) -> Map {
             let mut forced = 0u32;
             for j in 0..n {
                 let l = col_len(st[j]);
-                if l == 2 || (l == 1 && col_bits(st[j]) & 1 == 0) {
+                if l == 2 || (l == 1 && col_d(st[j]) == -1) {
                     forced |= 1 << j;
                 }
             }
@@ -320,14 +386,12 @@ fn is_palindrome(mask: u32, n: usize) -> bool {
 }
 
 /// Glue the top-half frontier `key` to the palindromic center row `c` and the
-/// mirrored bottom half, validating the center row's words and connectivity.
+/// mirrored bottom half, validating the center's words and connectivity.
 fn glue_ok(key: &Key, c: u32, n: usize) -> bool {
     let old = key;
     let cw = |j: usize| (c >> j) & 1 == 1;
 
-    // --- row h-1's horizontal words --------------------------------------
-    // The top-half loop validates each row when the next is placed, leaving the
-    // last top row (h-1) for here: its lower neighbour is the center row.
+    // Row h-1's horizontal words (its lower neighbour is the center row).
     let mut row_hm1: u32 = 0;
     let mut checked_hm1 = [false; MAXN];
     for j in 0..n {
@@ -340,54 +404,48 @@ fn glue_ok(key: &Key, c: u32, n: usize) -> bool {
         return false;
     }
 
-    // --- center row's horizontal words -----------------------------------
-    // center cell (h,j) checked iff it has a white vertical neighbour: row h-1
-    // (open run in col j) or row h+1 = reverse(row h-1) (open run in col n-1-j).
-    let mut checked_v = [false; MAXN];
+    // Center row's horizontal words. A center cell is checked iff it has a white
+    // vertical neighbour: row h-1 (col j) or row h+1 = reverse(row h-1) (col n-1-j).
+    let mut checked_c = [false; MAXN];
     for j in 0..n {
         if cw(j) {
-            checked_v[j] = col_len(old[j]) > 0 || col_len(old[n - 1 - j]) > 0;
+            checked_c[j] = col_len(old[j]) > 0 || col_len(old[n - 1 - j]) > 0;
         }
     }
-    if !hrow_ok(c, n, &checked_v) {
+    if !hrow_ok(c, n, &checked_c) {
         return false;
     }
 
-    // --- vertical words at the center ------------------------------------
-    let mut ptop = [false; 16];
-    let mut pmir = [false; 16];
+    // Vertical words at the center.
     for j in 0..n {
         if cw(j) {
-            // Crossing word: top run (col j) ++ center ++ reverse(top run col n-1-j).
-            let lt = run_pattern(old[j], &mut ptop);
-            let lm = run_pattern(old[n - 1 - j], &mut pmir);
             let center_checked = (j > 0 && cw(j - 1)) || (j + 1 < n && cw(j + 1));
-            let mut full: Vec<bool> = Vec::with_capacity(lt + 1 + lm);
-            full.extend_from_slice(&ptop[..lt]);
-            full.push(center_checked);
-            for t in (0..lm).rev() {
-                full.push(pmir[t]);
-            }
-            if !vrun_word_ok(&full) {
+            let m = old[n - 1 - j];
+            if !vrun_cross_ok(
+                col_len(old[j]),
+                col_trail(old[j]),
+                col_d(old[j]),
+                col_len(m),
+                col_trail(m),
+                col_d(m),
+                center_checked,
+            ) {
                 return false;
             }
-        } else if col_len(old[j]) > 0 {
-            // Top run closes at the (black) center; the mirrored bottom run in
-            // this column is validated when column n-1-j is processed.
-            let len = run_pattern(old[j], &mut ptop);
-            if !vrun_word_ok(&ptop[..len]) {
-                return false;
-            }
+        } else if col_len(old[j]) > 0
+            && !vrun_close_ok(col_len(old[j]), col_trail(old[j]), col_d(old[j]))
+        {
+            return false;
         }
     }
 
-    // --- Rule 4 edge columns ---------------------------------------------
+    // Rule 4 edge columns.
     let flags = old[n];
     if !((flags & 1 == 1) || (flags & 2 == 2) || cw(0)) {
         return false;
     }
 
-    // --- connectivity gluing (identical to the American case) ------------
+    // Connectivity gluing (identical to the American case).
     let m = (0..n).map(|j| col_label(old[j])).max().unwrap_or(0) as usize;
     if m == 0 {
         return false;

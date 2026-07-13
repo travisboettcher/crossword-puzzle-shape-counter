@@ -71,12 +71,12 @@ value. Timings are wall-clock on 4 cores.
 | 5 | 12 | ✓ | 17 | ✓ |
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
-| 11 | 17,438,702 | ✓ | 60,384,181 | _in progress_ |
+| 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~73 s) |
 | 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | _in progress_ |
 | 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | *stretch* |
 
-American reproduces A323839 through 15×15. British is validated through 9×9;
-11×11 and 13×13 are in progress.
+American reproduces A323839 through 15×15; British reproduces Keith's `#Total`
+through 11×11 (13×13 in progress). British 15×15 remains an open problem.
 
 ## Usage
 
