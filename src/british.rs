@@ -83,6 +83,11 @@ struct Ctx {
     /// with white mask `mask` valid, given which of its cells are checked?
     /// Replaces a per-word allocation in the innermost loop.
     row_ok: Vec<u64>,
+    /// `glue_tab[(top & 0xff) << 8 | (mirror & 0xff)]`, indexed by the run
+    /// statistics of a top column and its mirror column: bit 0 = the crossing
+    /// vertical word fails with a checked center cell, bit 1 = fails with an
+    /// unchecked one, bit 2 = the top run cannot close (center must be white).
+    glue_tab: Vec<u8>,
 }
 
 const FEAS_R: usize = MAXN + 1;
@@ -179,12 +184,32 @@ impl Ctx {
                 sub = (sub - 1) & mask;
             }
         }
+        let mut glue_tab = vec![0u8; 1 << 16];
+        for (i, e) in glue_tab.iter_mut().enumerate() {
+            let (c, m) = ((i >> 8) as u16, (i & 0xff) as u16);
+            let cross = |cc| {
+                vrun_cross_ok(
+                    col_len(c),
+                    col_trail(c),
+                    col_d(c),
+                    col_len(m),
+                    col_trail(m),
+                    col_d(m),
+                    cc,
+                )
+            };
+            *e = (!cross(true)) as u8
+                | ((!cross(false)) as u8) << 1
+                | ((col_len(c) > 0 && !vrun_close_ok(col_len(c), col_trail(c), col_d(c))) as u8)
+                    << 2;
+        }
         Ctx {
             n,
             code,
             stat,
             feas,
             row_ok,
+            glue_tab,
         }
     }
 
@@ -684,12 +709,30 @@ fn successors(ctx: &Ctx, st: &Key, row: usize, allowed: &[bool], mut f: impl FnM
     }
 }
 
+/// Palindromic allowed rows: 45 / 84 / 157 for n = 11 / 13 / 15.
+const MAX_CENTERS: usize = 256;
+
 /// Number of center rows that complete the last top-half frontier `st` into a
 /// valid grid. A column whose run cannot close must stay white in the center.
 #[inline]
 fn glue_count(ctx: &Ctx, st: &Key, centers: &[u32]) -> u64 {
     let g = GluePre::new(ctx, st);
-    centers.iter().filter(|&&c| g.ok(ctx, c)).count() as u64
+    // Stage 1: the pure-bitwise tests, branch-free over all centers at once so
+    // the compiler can vectorize them. Stage 2 runs only on the survivors.
+    let edge = (!g.edge_seen) as u32;
+    let mut bad = [0u32; MAX_CENTERS];
+    let bad = &mut bad[..centers.len()];
+    for (b, &c) in bad.iter_mut().zip(centers) {
+        let nb = ((c << 1) | (c >> 1)) & g.full;
+        *b = ((c & g.forced) ^ g.forced)
+            | (c & nb & g.bad_checked)
+            | (c & !nb & g.bad_unchecked)
+            | (edge & !c);
+    }
+    bad.iter()
+        .zip(centers)
+        .filter(|&(&b, &c)| b == 0 && g.ok_rest(ctx, c))
+        .count() as u64
 }
 
 /// Place the last top-half row and glue each successor to the center directly,
@@ -781,7 +824,7 @@ impl GluePre {
         let mut g = GluePre {
             n,
             full: (1u32 << n) - 1,
-            forced: forced_cols(st, n),
+            forced: 0,
             row_hm1: 0,
             long_runs: 0,
             vert_nb: 0,
@@ -801,32 +844,21 @@ impl GluePre {
                 g.comps[lab - 1] |= 1 << j;
                 g.ncomps = g.ncomps.max(lab);
             }
-            let m = st[n - 1 - j];
-            let cross = |cc| {
-                vrun_cross_ok(
-                    col_len(c),
-                    col_trail(c),
-                    col_d(c),
-                    col_len(m),
-                    col_trail(m),
-                    col_d(m),
-                    cc,
-                )
-            };
-            if !cross(true) {
-                g.bad_checked |= 1 << j;
-            }
-            if !cross(false) {
-                g.bad_unchecked |= 1 << j;
-            }
+            let t =
+                ctx.glue_tab[((c & 0xff) as usize) << 8 | (st[n - 1 - j] & 0xff) as usize] as u32;
+            g.bad_checked |= (t & 1) << j;
+            g.bad_unchecked |= ((t >> 1) & 1) << j;
+            g.forced |= ((t >> 2) & 1) << j;
         }
         g.vert_nb = g.row_hm1 | (g.row_hm1.reverse_bits() >> (32 - n));
         g
     }
 
+    /// All glue rules for one center row (the unit test's per-center check;
+    /// [`glue_count`] splits it into a vectorizable stage and [`Self::ok_rest`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     #[inline]
     fn ok(&self, ctx: &Ctx, c: u32) -> bool {
-        let n = self.n;
         if c & self.forced != self.forced || !(self.edge_seen || c & 1 == 1) {
             return false;
         }
@@ -834,6 +866,13 @@ impl GluePre {
         if c & nb & self.bad_checked != 0 || c & !nb & self.bad_unchecked != 0 {
             return false;
         }
+        self.ok_rest(ctx, c)
+    }
+
+    /// The table-lookup and connectivity half of [`GluePre::ok`].
+    #[inline]
+    fn ok_rest(&self, ctx: &Ctx, c: u32) -> bool {
+        let n = self.n;
         if !ctx.row_valid(self.row_hm1, self.long_runs | c) || !ctx.row_valid(c, self.vert_nb) {
             return false;
         }
@@ -922,7 +961,7 @@ fn into_parts(shards: Vec<Mutex<Map>>) -> Vec<Vec<(Packed, u64)>> {
 /// * `BRITISH_PASSES=0` (the default for n ≥ 13) glues each last-row successor
 ///   as it is generated, so that row is never stored or merged. It glues more
 ///   often (once per successor, not per distinct state) but needs no memory
-///   for that row and no repeated passes. 13×13: ~26 min, 7 GB.
+///   for that row and no repeated passes. 13×13: ~18 min, 7 GB.
 /// * `BRITISH_PASSES=k ≥ 1` (default 1 below 13) builds the last row in `k`
 ///   passes, each keeping 1/k of its shards and gluing them before moving on —
 ///   k× the work of that transfer step for 1/k of its peak memory.
@@ -1207,6 +1246,8 @@ mod tests {
                 .collect();
             for st in &frontier {
                 let g = GluePre::new(&ctx, st);
+                let expect = centers.iter().filter(|&&c| glue_ok(&ctx, st, c)).count() as u64;
+                assert_eq!(glue_count(&ctx, st, &centers), expect, "n={n} state={st:?}");
                 for &c in &centers {
                     assert_eq!(
                         g.ok(&ctx, c),

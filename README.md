@@ -76,7 +76,7 @@ value. Timings are wall-clock on 4 cores.
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
 | 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~5 s) |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~26 min, 7 GB) |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~18 min, 7 GB) |
 | 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | — |
 
 American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
@@ -87,7 +87,7 @@ through 13×13.
 The British frontier grows steeply. The top half of a 13×13 grid passes through
 1.6K → 119K → 1.6M → 24M → 191M states (rows 0–4). Its last row (672M distinct
 states) is never stored: each successor is glued to the center as soon as it is
-generated. The run takes **26 min on 4 cores with a 7.2 GB peak**. The first
+generated. The run takes **18 min on 4 cores with a 7.3 GB peak**. The first
 version of this DP ran out of memory past ~16 GB; the first working version
 took 1 h 59 min and 11.9 GB.
 
@@ -104,7 +104,13 @@ took 1 h 59 min and 11.9 GB.
   row-validity lookup table) decide every rule for a candidate row. Only rows
   that contain every forced column are enumerated. The successor is then built
   with bitmask component merging (`step_fast`), not a union-find.
-* **Bitmask gluing** (`GluePre`) does the same for the center row.
+* **Bitmask gluing** (`GluePre`) does the same for the center row. Its
+  per-column crossing checks come from a 64 KB lookup table, and the
+  pure-bitwise tests run as one branch-free pass over all center rows
+  (auto-vectorizable) before the table lookups and connectivity check.
+  Building with `-C target-cpu=native` (AVX2/AVX-512) measured no further
+  gain; the workload is dominated by branchy, data-dependent work and random
+  memory access, not wide arithmetic.
 * **One sharded concurrent map.** Successors merge into 1024 mutex-guarded
   shards, so each state is held once instead of once per thread.
 * **Fused last row** (`BRITISH_PASSES=0`, the default from 13×13 up). Gluing
@@ -137,7 +143,7 @@ embarrassingly parallel).
 # Count via the DP (American uses the folded transfer matrix; British likewise)
 cargo run --release --bin count -- --style american --n 13
 cargo run --release --bin count -- --style british  --n 9
-cargo run --release --bin count -- --style british --n 13   # ~26 min
+cargo run --release --bin count -- --style british --n 13   # ~18 min
 
 # Timing / frontier statistics
 DP_STATS=1 cargo run --release --bin bench -- american 13
