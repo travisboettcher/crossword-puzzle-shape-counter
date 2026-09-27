@@ -30,11 +30,15 @@
 //! Plus a flag u16 (`e0 | eN<<1`) for the Rule-4 edge columns.
 //!
 //! ## Scaling to 13×13
-//! Stored frontiers are packed to 16 bytes ([`Ctx::pack`]) and merged with
-//! their left–right mirror ([`Ctx::pack_canon`]); runs that can no longer be
+//! Stored frontiers are packed to 16 bytes and merged with their left–right
+//! mirror ([`Ctx::pack_canon`]); runs that can no longer be
 //! completed are pruned ([`feasible`]); most candidate rows are rejected by
-//! bitmask tests ([`Prefilter`]) before the union-find; successors are merged
-//! into one sharded concurrent map; and the last rows can be built in passes.
+//! bitmask tests ([`Prefilter`]), which then build successors with bitmask
+//! component merging ([`Prefilter::step_fast`]); successors are merged into one
+//! sharded concurrent map; and the last row is glued to the center as it is
+//! generated ([`advance_glue`], with bitmask gluing in [`GluePre`]) instead of
+//! being stored. The slower all-rules [`step`] and [`glue_ok`] are kept as
+//! references, and a unit test checks the fast paths against them.
 //! 13×13 peaks at ~24M / 191M / ~670M states in rows 3 / 4 / 5.
 
 use std::sync::Mutex;
@@ -196,50 +200,35 @@ impl Ctx {
         self.feas[feas_idx(len, trail, d, rem)]
     }
 
-    #[inline]
-    fn pack(&self, w: &Key) -> Packed {
-        let mut k = 0u128;
-        for (j, &c) in w.iter().enumerate().take(self.n) {
-            if col_len(c) > 0 {
-                let code = self.code[(c & 0xff) as usize];
-                debug_assert!(code != 0, "unreachable run statistic");
-                let b = code as u128 | (((col_label(c) - 1) as u128) << STAT_BITS);
-                k |= b << (8 * j);
-            }
-        }
-        k |= (w[self.n] as u128) << 120;
-        [k as u64, (k >> 64) as u64]
-    }
-
     /// The smaller packing of `w` and its left–right mirror. Mirroring a
     /// partial grid preserves validity and maps successors to successors, and
     /// the (palindromic) center rows glue to a state and its mirror equally
     /// often, so each mirror pair can be stored once with the summed count.
     #[inline]
     fn pack_canon(&self, w: &Key) -> Packed {
+        // One sweep from the right packs `w` at column j and its mirror at
+        // column n−1−j, relabelling the mirror by first appearance.
         let n = self.n;
-        let mut m = [0u16; SLOTS];
+        let (mut a, mut b) = (0u128, 0u128);
         let mut relabel = [0u8; MAXN + 1];
-        let mut next = 1u8;
-        for j in 0..n {
-            let c = w[n - 1 - j];
+        let mut next = 0u8;
+        for (i, &c) in w[..n].iter().rev().enumerate() {
             if col_len(c) > 0 {
+                let code = self.code[(c & 0xff) as usize] as u128;
                 let l = col_label(c) as usize;
                 if relabel[l] == 0 {
-                    relabel[l] = next;
                     next += 1;
+                    relabel[l] = next;
                 }
-                m[j] = (c & 0xff) | ((relabel[l] as u16) << 8);
+                a |= (code | (((l - 1) as u128) << STAT_BITS)) << (8 * (n - 1 - i));
+                b |= (code | (((relabel[l] - 1) as u128) << STAT_BITS)) << (8 * i);
             }
         }
-        let f = w[n];
-        m[n] = ((f & 1) << 1) | ((f >> 1) & 1);
-        let (a, b) = (self.pack(w), self.pack(&m));
-        if (a[1], a[0]) <= (b[1], b[0]) {
-            a
-        } else {
-            b
-        }
+        let f = w[n] as u128;
+        a |= f << 120;
+        b |= (((f & 1) << 1) | ((f >> 1) & 1)) << 120;
+        let k = a.min(b);
+        [k as u64, (k >> 64) as u64]
     }
 
     #[inline]
@@ -422,7 +411,10 @@ fn hrow_ok(mask: u32, n: usize, checked_v: &[bool; MAXN]) -> bool {
     true
 }
 
-/// Place row `w` (grid row `row`) onto frontier `key` (row `row − 1`).
+/// Reference transition: place row `w` (grid row `row`) onto frontier `key`
+/// (row `row − 1`), checking every rule. The hot path uses [`Prefilter::pass`]
+/// + [`step_fast`]; a unit test checks the two agree on every input.
+#[cfg_attr(not(test), allow(dead_code))]
 fn step(ctx: &Ctx, key: &Key, w: u32, row: usize) -> Option<Key> {
     let n = ctx.n;
     let rem = n - 1 - row; // cells left below this row in each column
@@ -557,6 +549,11 @@ struct Prefilter {
     /// per component label, the frontier columns carrying it
     comps: [u32; MAXN],
     ncomps: usize,
+    /// per column, the new cell's run statistic (`pack_col` low byte) when it
+    /// is checked / unchecked (only meaningful when not dead)
+    next_checked: [u16; MAXN],
+    next_unchecked: [u16; MAXN],
+    flags: u16,
 }
 
 impl Prefilter {
@@ -570,10 +567,15 @@ impl Prefilter {
             dead_unchecked: 0,
             comps: [0; MAXN],
             ncomps: 0,
+            next_checked: [0; MAXN],
+            next_unchecked: [0; MAXN],
+            flags: st[n],
         };
         for (j, &c) in st.iter().enumerate().take(n) {
             let (l, t, d) = (col_len(c), col_trail(c), col_d(c));
             let (alive_c, alive_u) = if l == 0 {
+                p.next_checked[j] = pack_col(0, 1, 0, 1);
+                p.next_unchecked[j] = pack_col(0, 1, 1, -1);
                 (ctx.alive(1, 0, 1, rem), ctx.alive(1, 1, -1, rem))
             } else {
                 p.row_mask |= 1 << j;
@@ -584,6 +586,10 @@ impl Prefilter {
                 p.comps[lab - 1] |= 1 << j;
                 p.ncomps = p.ncomps.max(lab);
                 let nl = (l + 1).min(3);
+                p.next_checked[j] = pack_col(0, nl, 0, d + 1);
+                if t < 2 && d > -DBIAS {
+                    p.next_unchecked[j] = pack_col(0, nl, t + 1, d - 1);
+                }
                 (
                     ctx.alive(nl, 0, d + 1, rem),
                     t + 1 < 3 && !(l == 1 && t == 1) && ctx.alive(nl, t + 1, d - 1, rem),
@@ -610,6 +616,246 @@ impl Prefilter {
         }
         self.comps[..self.ncomps].iter().all(|&m| w & m != 0)
     }
+
+    /// The successor for a row `w` that passed [`Prefilter::pass`] (and was
+    /// drawn from the forced-column supersets): every rule is already
+    /// satisfied, so only the new frontier is built. Components are merged as
+    /// bitmasks: each horizontal segment of `w` starts as its own group, and
+    /// every old component fuses the groups it touches.
+    #[inline]
+    fn step_fast(&self, w: u32, full: u32) -> Key {
+        let mut groups = [0u32; MAXN];
+        let mut ng = segments(w, &mut groups);
+        for &m in &self.comps[..self.ncomps] {
+            ng = fuse(&mut groups, ng, m & w);
+        }
+        // canonical labels: order groups by their lowest column
+        groups[..ng].sort_unstable_by_key(|g| g.trailing_zeros());
+        let nb = ((w << 1) | (w >> 1)) & full;
+        let mut out = [0u16; SLOTS];
+        for (li, &g) in groups[..ng].iter().enumerate() {
+            let label = ((li + 1) as u16) << 8;
+            let mut b = g;
+            while b != 0 {
+                let j = b.trailing_zeros() as usize;
+                b &= b - 1;
+                let stat = if nb >> j & 1 == 1 {
+                    self.next_checked[j]
+                } else {
+                    self.next_unchecked[j]
+                };
+                out[j] = stat | label;
+            }
+        }
+        let n = full.count_ones() as usize;
+        out[n] = self.flags | (w & 1) as u16 | (((w >> (n - 1)) & 1) << 1) as u16;
+        out
+    }
+}
+
+fn allowed_set(n: usize, rows: &[u32]) -> Vec<bool> {
+    let mut allowed = vec![false; 1 << n];
+    for &w in rows {
+        allowed[w as usize] = true;
+    }
+    allowed
+}
+
+/// Call `f` with every valid successor of `st` when grid row `row` is placed.
+#[inline]
+fn successors(ctx: &Ctx, st: &Key, row: usize, allowed: &[bool], mut f: impl FnMut(Key)) {
+    let n = ctx.n;
+    let full: u32 = (1u32 << n) - 1;
+    let forced = forced_cols(st, n);
+    let pre = Prefilter::new(ctx, st, row);
+    // Visit only the rows containing every forced column: walk the submasks of
+    // the free columns, filtered by the allowed-row set.
+    let free = full & !forced;
+    let mut sub = free;
+    loop {
+        let w = forced | sub;
+        if allowed[w as usize] && !(row == 0 && w == 0) && pre.pass(ctx, w, full) {
+            f(pre.step_fast(w, full));
+        }
+        if sub == 0 {
+            break;
+        }
+        sub = (sub - 1) & free;
+    }
+}
+
+/// Number of center rows that complete the last top-half frontier `st` into a
+/// valid grid. A column whose run cannot close must stay white in the center.
+#[inline]
+fn glue_count(ctx: &Ctx, st: &Key, centers: &[u32]) -> u64 {
+    let g = GluePre::new(ctx, st);
+    centers.iter().filter(|&&c| g.ok(ctx, c)).count() as u64
+}
+
+/// Place the last top-half row and glue each successor to the center directly,
+/// without storing (or merging) that row. Trades merging for zero memory: glue
+/// runs once per successor instead of once per distinct state.
+fn advance_glue(
+    ctx: &Ctx,
+    input: &[Vec<(Packed, u64)>],
+    rows: &[u32],
+    row: usize,
+    centers: &[u32],
+) -> u128 {
+    let allowed = allowed_set(ctx.n, rows);
+    input
+        .par_iter()
+        .map(|part| {
+            let mut local = 0u128;
+            for (p, cnt) in part {
+                successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
+                    local += *cnt as u128 * glue_count(ctx, &ns, centers) as u128;
+                });
+            }
+            local
+        })
+        .sum()
+}
+
+/// Split `w` into its maximal runs of ones; returns how many.
+#[inline]
+fn segments(w: u32, groups: &mut [u32; MAXN]) -> usize {
+    let mut ng = 0;
+    let mut rest = w;
+    while rest != 0 {
+        let lo = rest & rest.wrapping_neg();
+        let above = (rest + lo) & !rest; // first zero above the run at `lo`
+        let seg = above.wrapping_sub(lo) & rest;
+        groups[ng] = seg;
+        ng += 1;
+        rest &= !seg;
+    }
+    ng
+}
+
+/// Merge every group intersecting `touch` into one; returns the new count.
+#[inline]
+fn fuse(groups: &mut [u32; MAXN], ng: usize, touch: u32) -> usize {
+    let mut merged = 0u32;
+    let mut k = 0;
+    for i in 0..ng {
+        let g = groups[i];
+        if g & touch != 0 {
+            merged |= g;
+        } else {
+            groups[k] = g;
+            k += 1;
+        }
+    }
+    if merged == 0 {
+        return ng;
+    }
+    groups[k] = merged;
+    k + 1
+}
+
+/// Per-state tables for gluing the last top-half frontier to a center row
+/// and the mirrored bottom half; [`GluePre::ok`] agrees with [`glue_ok`] (see
+/// the unit test) but works on bitmasks.
+struct GluePre {
+    n: usize,
+    full: u32,
+    /// columns whose top run cannot close (center must be white there)
+    forced: u32,
+    row_hm1: u32,
+    long_runs: u32,
+    /// row h−1 | row h+1 (= reversed row h−1): center cells with a vertical neighbour
+    vert_nb: u32,
+    /// center columns whose crossing vertical word fails if the center cell
+    /// is checked / unchecked
+    bad_checked: u32,
+    bad_unchecked: u32,
+    edge_seen: bool,
+    comps: [u32; MAXN],
+    ncomps: usize,
+}
+
+impl GluePre {
+    fn new(ctx: &Ctx, st: &Key) -> GluePre {
+        let n = ctx.n;
+        let mut g = GluePre {
+            n,
+            full: (1u32 << n) - 1,
+            forced: forced_cols(st, n),
+            row_hm1: 0,
+            long_runs: 0,
+            vert_nb: 0,
+            bad_checked: 0,
+            bad_unchecked: 0,
+            edge_seen: st[n] & 3 != 0,
+            comps: [0; MAXN],
+            ncomps: 0,
+        };
+        for (j, &c) in st.iter().enumerate().take(n) {
+            if col_len(c) > 0 {
+                g.row_hm1 |= 1 << j;
+                if col_len(c) >= 2 {
+                    g.long_runs |= 1 << j;
+                }
+                let lab = col_label(c) as usize;
+                g.comps[lab - 1] |= 1 << j;
+                g.ncomps = g.ncomps.max(lab);
+            }
+            let m = st[n - 1 - j];
+            let cross = |cc| {
+                vrun_cross_ok(
+                    col_len(c),
+                    col_trail(c),
+                    col_d(c),
+                    col_len(m),
+                    col_trail(m),
+                    col_d(m),
+                    cc,
+                )
+            };
+            if !cross(true) {
+                g.bad_checked |= 1 << j;
+            }
+            if !cross(false) {
+                g.bad_unchecked |= 1 << j;
+            }
+        }
+        g.vert_nb = g.row_hm1 | (g.row_hm1.reverse_bits() >> (32 - n));
+        g
+    }
+
+    #[inline]
+    fn ok(&self, ctx: &Ctx, c: u32) -> bool {
+        let n = self.n;
+        if c & self.forced != self.forced || !(self.edge_seen || c & 1 == 1) {
+            return false;
+        }
+        let nb = ((c << 1) | (c >> 1)) & self.full;
+        if c & nb & self.bad_checked != 0 || c & !nb & self.bad_unchecked != 0 {
+            return false;
+        }
+        if !ctx.row_valid(self.row_hm1, self.long_runs | c) || !ctx.row_valid(c, self.vert_nb) {
+            return false;
+        }
+        // Connectivity: center segments, fused by each top component and by
+        // its mirror image below, must end as one group touching every component.
+        let mut groups = [0u32; MAXN];
+        let mut ng = segments(c, &mut groups);
+        if ng == 0 || self.ncomps == 0 {
+            return false;
+        }
+        for &m in &self.comps[..self.ncomps] {
+            let t = m & c;
+            if t == 0 {
+                return false; // a top component never reaches the center
+            }
+            // the top component and its mirror image below are distinct
+            // cells: each fuses only the center segments it touches
+            ng = fuse(&mut groups, ng, t);
+            ng = fuse(&mut groups, ng, (m.reverse_bits() >> (32 - n)) & c);
+        }
+        ng == 1
+    }
 }
 
 /// Place grid row `row` on every frontier in `input`, merging equal successors.
@@ -628,12 +874,7 @@ fn advance(
     row: usize,
     keep: &(dyn Fn(usize) -> bool + Sync),
 ) -> Vec<Mutex<Map>> {
-    let n = ctx.n;
-    let full: u32 = (1u32 << n) - 1;
-    let mut allowed = vec![false; 1 << n];
-    for &w in rows {
-        allowed[w as usize] = true;
-    }
+    let allowed = allowed_set(ctx.n, rows);
     let shards: Vec<Mutex<Map>> = (0..SHARDS).map(|_| Mutex::new(Map::default())).collect();
     let flush = |buf: &mut Vec<(Packed, u64)>, s: usize| {
         let mut m = shards[s].lock().unwrap();
@@ -645,32 +886,16 @@ fn advance(
         || vec![Vec::<(Packed, u64)>::new(); SHARDS],
         |bufs, part| {
             for (p, cnt) in part {
-                let st = ctx.unpack(p);
-                let forced = forced_cols(&st, n);
-                let pre = Prefilter::new(ctx, &st, row);
-                // Visit only the rows containing every forced column: walk the
-                // submasks of the free columns, filtered by the allowed-row set.
-                let free = full & !forced;
-                let mut sub = free;
-                loop {
-                    let w = forced | sub;
-                    if allowed[w as usize] && !(row == 0 && w == 0) && pre.pass(ctx, w, full) {
-                        if let Some(ns) = step(ctx, &st, w, row) {
-                            let pk = ctx.pack_canon(&ns);
-                            let s = shard_of(&pk);
-                            if keep(s) {
-                                bufs[s].push((pk, *cnt));
-                                if bufs[s].len() >= FLUSH {
-                                    flush(&mut bufs[s], s);
-                                }
-                            }
+                successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
+                    let pk = ctx.pack_canon(&ns);
+                    let s = shard_of(&pk);
+                    if keep(s) {
+                        bufs[s].push((pk, *cnt));
+                        if bufs[s].len() >= FLUSH {
+                            flush(&mut bufs[s], s);
                         }
                     }
-                    if sub == 0 {
-                        break;
-                    }
-                    sub = (sub - 1) & free;
-                }
+                });
             }
             for (s, b) in bufs.iter_mut().enumerate() {
                 if !b.is_empty() {
@@ -693,28 +918,37 @@ fn into_parts(shards: Vec<Mutex<Map>>) -> Vec<Vec<(Packed, u64)>> {
 
 /// Count valid 180°-symmetric British n×n grids (Keith's #Total).
 ///
-/// Memory knobs (both default to 1):
-/// * `BRITISH_PASSES=k` builds the last top-half row in `k` passes, each keeping
-///   1/k of its shards and gluing them before moving on — k× the work of that
-///   transfer step for 1/k of its peak memory.
-/// * `BRITISH_ROW_PASSES=k` does the same for the second-to-last row, whose
+/// Knobs:
+/// * `BRITISH_PASSES=0` (the default for n ≥ 13) glues each last-row successor
+///   as it is generated, so that row is never stored or merged. It glues more
+///   often (once per successor, not per distinct state) but needs no memory
+///   for that row and no repeated passes. 13×13: ~26 min, 7 GB.
+/// * `BRITISH_PASSES=k ≥ 1` (default 1 below 13) builds the last row in `k`
+///   passes, each keeping 1/k of its shards and gluing them before moving on —
+///   k× the work of that transfer step for 1/k of its peak memory.
+/// * `BRITISH_ROW_PASSES=k` (default 1) splits the second-to-last row, whose
 ///   shards are flattened after each pass, so only 1/k of it is ever held as
 ///   hash maps at once.
 pub fn count(n: usize, style: Style) -> u128 {
     assert_eq!(style, Style::British);
-    let env = |k: &str| {
+    let env = |k: &str, default: usize| {
         std::env::var(k)
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1)
+            .unwrap_or(default)
     };
-    count_with_passes(n, env("BRITISH_ROW_PASSES"), env("BRITISH_PASSES"))
+    // Merging the last row wins while it fits in memory; fusing wins beyond.
+    let passes = env("BRITISH_PASSES", if n >= 13 { 0 } else { 1 });
+    count_with_passes(n, env("BRITISH_ROW_PASSES", 1), passes)
 }
 
 /// [`count`] with explicit pass counts for the second-to-last (`row_passes`)
-/// and last (`passes`) top-half rows. The result does not depend on them.
+/// and last (`passes`, 0 = fused with the glue) top-half rows. The result
+/// does not depend on them.
 pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
     assert!(n >= 5 && n % 2 == 1 && n <= MAXN);
+    // passes == 0: glue the last row as it is generated (never stored)
+    let fused = passes == 0;
     let (row_passes, passes) = (row_passes.max(1), passes.max(1));
     let h = (n - 1) / 2;
     let rows = allowed_rows(n);
@@ -749,6 +983,13 @@ pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
         .copied()
         .filter(|&m| is_palindrome(m, n))
         .collect();
+    if fused {
+        let total = advance_glue(&ctx, &parts, &rows, h - 1, &centers);
+        if instrument {
+            eprintln!("  row {} fused with glue ({:.2?})", h - 1, t0.elapsed());
+        }
+        return total;
+    }
     let mut total = 0u128;
     for pass in 0..passes {
         let keep = move |s: usize| s % passes == pass;
@@ -768,11 +1009,7 @@ pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
                 let mut local = 0u128;
                 for (p, cnt) in &m {
                     let st = ctx.unpack(p);
-                    for &c in &centers {
-                        if glue_ok(&ctx, &st, c) {
-                            local += *cnt as u128;
-                        }
-                    }
+                    local += *cnt as u128 * glue_count(&ctx, &st, &centers) as u128;
                 }
                 local
             })
@@ -795,6 +1032,8 @@ fn is_palindrome(mask: u32, n: usize) -> bool {
 
 /// Glue the top-half frontier `key` to the palindromic center row `c` and the
 /// mirrored bottom half, validating the center's words and connectivity.
+/// Reference for [`GluePre::ok`].
+#[cfg_attr(not(test), allow(dead_code))]
 fn glue_ok(ctx: &Ctx, key: &Key, c: u32) -> bool {
     let n = ctx.n;
     let old = key;
@@ -925,5 +1164,57 @@ fn union3(parent: &mut [usize; MAXN * 3], a: usize, b: usize) {
     let (ra, rb) = (find3(parent, a), find3(parent, b));
     if ra != rb {
         parent[ra] = rb;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fast path (forced-superset enumeration + prefilter + `step_fast`)
+    /// must produce exactly the successors of the reference `step`, for every
+    /// frontier reached in a full 9×9 run.
+    #[test]
+    fn fast_step_matches_reference() {
+        for n in [5usize, 7, 9] {
+            let ctx = Ctx::new(n);
+            let rows = allowed_rows(n);
+            let allowed = allowed_set(n, &rows);
+            let mut frontier: Vec<Key> = vec![[0u16; SLOTS]];
+            for row in 0..(n - 1) / 2 {
+                let mut next = std::collections::BTreeSet::new();
+                for st in &frontier {
+                    let mut fast = Vec::new();
+                    successors(&ctx, st, row, &allowed, |ns| fast.push(ns));
+                    let mut slow: Vec<Key> = rows
+                        .iter()
+                        .filter(|&&w| !(row == 0 && w == 0))
+                        .filter_map(|&w| step(&ctx, st, w, row))
+                        .collect();
+                    fast.sort();
+                    slow.sort();
+                    assert_eq!(fast, slow, "n={n} row={row} state={st:?}");
+                    next.extend(slow);
+                }
+                frontier = next.into_iter().collect();
+            }
+            // ...and fast gluing must agree with the reference on every
+            // last-row frontier and every palindromic center row.
+            let centers: Vec<u32> = rows
+                .iter()
+                .copied()
+                .filter(|&m| is_palindrome(m, n))
+                .collect();
+            for st in &frontier {
+                let g = GluePre::new(&ctx, st);
+                for &c in &centers {
+                    assert_eq!(
+                        g.ok(&ctx, c),
+                        glue_ok(&ctx, st, c),
+                        "n={n} c={c:b} state={st:?}"
+                    );
+                }
+            }
+        }
     }
 }

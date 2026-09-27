@@ -23,7 +23,7 @@ fn british_paper_counts_5_to_9() {
 }
 
 #[test]
-#[ignore = "slow: ~10 s, ~7M frontier states"]
+#[ignore = "slow: ~5 s, ~7M frontier states"]
 fn british_paper_count_11() {
     assert_eq!(british::count(11, Style::British), 60_384_181);
 }
@@ -31,14 +31,14 @@ fn british_paper_count_11() {
 /// Splitting the last two rows into passes must not change the count.
 #[test]
 fn british_passes_do_not_change_count() {
-    for (rp, p) in [(2, 3), (3, 1), (1, 4)] {
+    for (rp, p) in [(2, 3), (3, 1), (1, 4), (1, 0), (2, 0)] {
         assert_eq!(british::count_with_passes(9, rp, p), 68_956);
     }
 }
 
 #[test]
-#[ignore = "slow: ~2 h on 4 cores, ~12 GB peak; 24M/191M/672M frontier states"]
+#[ignore = "slow: ~26 min on 4 cores, ~7 GB peak; 24M/191M frontier states"]
 fn british_paper_count_13() {
-    // Four passes over the last row keep the peak under 12 GB.
-    assert_eq!(british::count_with_passes(13, 1, 4), 162_468_835_136);
+    // The last row is glued as it is generated (never stored).
+    assert_eq!(british::count_with_passes(13, 1, 0), 162_468_835_136);
 }
