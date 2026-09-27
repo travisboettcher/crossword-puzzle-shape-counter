@@ -88,6 +88,9 @@ struct Ctx {
     /// vertical word fails with a checked center cell, bit 1 = fails with an
     /// unchecked one, bit 2 = the top run cannot close (center must be white).
     glue_tab: Vec<u8>,
+    /// `canon[row][stat & 0xff]`: a representative of the run statistics that
+    /// behave identically from grid row `row` on (see [`Ctx::build_canon`]).
+    canon: Vec<[u8; 256]>,
 }
 
 const FEAS_R: usize = MAXN + 1;
@@ -203,14 +206,116 @@ impl Ctx {
                 | ((col_len(c) > 0 && !vrun_close_ok(col_len(c), col_trail(c), col_d(c))) as u8)
                     << 2;
         }
-        Ctx {
+        let mut ctx = Ctx {
             n,
             code,
             stat,
             feas,
             row_ok,
             glue_tab,
+            canon: Vec::new(),
+        };
+        ctx.canon = ctx.build_canon();
+        ctx
+    }
+
+    /// Stats reachable by a run (low bytes of `pack_col`), including 0 = black.
+    fn stat_list(&self) -> Vec<u16> {
+        let mut v = vec![0u16];
+        v.extend((1..MAX_CODES).map(|k| self.stat[k]).filter(|&s| s != 0));
+        v
+    }
+
+    /// Extend run statistic `s` (placed on grid row `row`) by one white cell on
+    /// row `row + 1`, checked or not; `None` if that is illegal or the run could
+    /// no longer finish. Mirrors [`Prefilter::new`] exactly.
+    fn extend(&self, s: u16, checked: bool, row: usize) -> Option<u16> {
+        let rem = self.n - 1 - (row + 1);
+        let (l, t, d) = (col_len(s), col_trail(s), col_d(s));
+        let (nl, nt, nd) = if l == 0 {
+            if checked {
+                (1, 0, 1)
+            } else {
+                (1, 1, -1)
+            }
+        } else if checked {
+            ((l + 1).min(3), 0, d + 1)
+        } else {
+            if t + 1 >= 3 || (l == 1 && t == 1) || d - 1 + DBIAS < 0 {
+                return None;
+            }
+            ((l + 1).min(3), t + 1, d - 1)
+        };
+        if d + 1 + DBIAS >= 16 || !self.alive(nl, nt, nd, rem) {
+            return None;
         }
+        Some(pack_col(0, nl, nt, nd))
+    }
+
+    /// Bounded-horizon bisimulation over run statistics. Two stats at row `r`
+    /// are equivalent iff they agree on everything the DP ever asks of them
+    /// from row `r` on: white/black, "checked from above" (len ≥ 2, used by the
+    /// row's horizontal words), whether the run may close, and — recursively —
+    /// the classes of their checked / unchecked extensions; at the last
+    /// top-half row, their full glue behaviour in both the top and the mirror
+    /// role. Replacing a stat by its class representative therefore never
+    /// changes a count, but lets more frontiers merge.
+    fn build_canon(&self) -> Vec<[u8; 256]> {
+        let h = (self.n - 1) / 2;
+        let stats = self.stat_list();
+        let mut canon = vec![[0u8; 256]; h];
+        let mut class: Vec<AHashMap<u16, usize>> = vec![AHashMap::new(); h];
+        for r in (0..h).rev() {
+            let mut ids: AHashMap<Vec<u32>, (usize, u16)> = AHashMap::new();
+            for &s in &stats {
+                let l = col_len(s);
+                let mut key = vec![
+                    (l > 0) as u32,
+                    (l >= 2) as u32,
+                    (l > 0 && !vrun_close_ok(l, col_trail(s), col_d(s))) as u32,
+                ];
+                if r + 1 == h {
+                    for &m in &stats {
+                        key.push(self.glue_tab[(s as usize) << 8 | m as usize] as u32);
+                        key.push(self.glue_tab[(m as usize) << 8 | s as usize] as u32);
+                    }
+                } else {
+                    for checked in [true, false] {
+                        key.push(match self.extend(s, checked, r) {
+                            // a stat outside the code book only arises from a
+                            // stat that cannot occur on this row; keep it apart
+                            Some(x) => class[r + 1].get(&x).map_or(u32::MAX, |&c| 1 + c as u32),
+                            None => 0,
+                        });
+                    }
+                }
+                let next = ids.len();
+                let (id, rep) = *ids.entry(key).or_insert((next, s));
+                class[r].insert(s, id);
+                canon[r][s as usize] = rep as u8;
+            }
+            if std::env::var("CANON_STATS").is_ok() {
+                for &x in &stats {
+                    if canon[r][x as usize] as u16 != x {
+                        eprintln!(
+                            "    row {r}: (len {}, trail {}, d {}) ~ (len {}, trail {}, d {})",
+                            col_len(x),
+                            col_trail(x),
+                            col_d(x),
+                            col_len(canon[r][x as usize] as u16),
+                            col_trail(canon[r][x as usize] as u16),
+                            col_d(canon[r][x as usize] as u16)
+                        );
+                    }
+                }
+                eprintln!(
+                    "  canon row {r}: {} stats -> {} classes",
+                    stats.len(),
+                    ids.len()
+                );
+            }
+        }
+        canon
     }
 
     /// Table lookup for [`hrow_ok`]; `mask` must be an allowed row.
@@ -626,6 +731,10 @@ impl Prefilter {
             if !alive_u {
                 p.dead_unchecked |= 1 << j;
             }
+            // store each new run statistic as its equivalence-class representative
+            let cr = &ctx.canon[row];
+            p.next_checked[j] = cr[p.next_checked[j] as usize] as u16;
+            p.next_unchecked[j] = cr[p.next_unchecked[j] as usize] as u16;
         }
         p
     }
@@ -1229,6 +1338,14 @@ mod tests {
                         .iter()
                         .filter(|&&w| !(row == 0 && w == 0))
                         .filter_map(|&w| step(&ctx, st, w, row))
+                        .map(|mut k| {
+                            // the fast path stores class representatives
+                            for c in k.iter_mut().take(n) {
+                                let rep = ctx.canon[row][(*c & 0xff) as usize] as u16;
+                                *c = (*c & 0xff00) | rep;
+                            }
+                            k
+                        })
                         .collect();
                     fast.sort();
                     slow.sort();
