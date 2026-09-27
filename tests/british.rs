@@ -23,12 +23,22 @@ fn british_paper_counts_5_to_9() {
 }
 
 #[test]
-#[ignore = "slow: ~73s, ~16M frontier states"]
+#[ignore = "slow: ~10 s, ~7M frontier states"]
 fn british_paper_count_11() {
     assert_eq!(british::count(11, Style::British), 60_384_181);
 }
 
-// British 13x13 (Keith's 162,468,835,136) is reproduced by the same DP, but its
-// frontier exceeds the memory available here: row 3 alone reaches ~49M states and
-// the two remaining rows grow into the hundreds of millions, OOM-ing past ~16 GB.
-// It is left unasserted rather than run in a memory-constrained environment.
+/// Splitting the last two rows into passes must not change the count.
+#[test]
+fn british_passes_do_not_change_count() {
+    for (rp, p) in [(2, 3), (3, 1), (1, 4)] {
+        assert_eq!(british::count_with_passes(9, rp, p), 68_956);
+    }
+}
+
+#[test]
+#[ignore = "slow: ~2 h on 4 cores, ~12 GB peak; 24M/191M/672M frontier states"]
+fn british_paper_count_13() {
+    // Four passes over the last row keep the peak under 12 GB.
+    assert_eq!(british::count_with_passes(13, 1, 4), 162_468_835_136);
+}

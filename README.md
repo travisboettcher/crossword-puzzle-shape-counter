@@ -75,21 +75,45 @@ value. Timings are wall-clock on 4 cores.
 | 5 | 12 | ✓ | 17 | ✓ |
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
-| 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~73 s) |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ⚠ memory-bound (see below) |
+| 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~10 s) |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~2 h, 12 GB) |
 | 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | — |
 
 American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
-through 11×11.
+through 13×13.
 
-### British 13×13 — memory-bound here
+### British 13×13 — how it fits in 15 GB
 
-The same British DP is correct at 13×13 (Keith's value is 162,468,835,136), but
-it exceeds the ~15 GB of RAM in this environment. The frontier grows steeply:
-row 3 alone reaches ~49M states, and the two remaining top-half rows climb into
-the hundreds of millions, OOM-ing past ~16 GB. Reaching 13×13 (and the open
-15×15) would need a lower-memory state encoding or an external-memory / sharded
-transfer step — a natural next step, not a correctness gap.
+The British frontier grows steeply. With the reductions below, the top half of
+a 13×13 grid passes through 1.6K → 119K → 1.6M → 24M → 191M → 672M states
+(rows 0–5). The run took 1 h 59 min on 4 cores, with a peak RSS of 11.9 GB.
+The first version of this DP ran out of memory past ~16 GB with 49M states at
+row 3.
+
+* **Packed states.** A frontier is stored in 16 bytes: per column, a 5-bit code
+  for the vertical-run statistic plus a 3-bit component label. It is unpacked
+  only while it is being extended.
+* **Mirror merging.** Reflecting a partial grid left-to-right preserves validity
+  and commutes with every transition, and the palindromic center rows glue to a
+  state and its mirror equally often. So each mirror pair is stored once, which
+  halves both the states and the work.
+* **Dead-run pruning.** A vertical run whose statistic cannot be completed in
+  the cells left in its column is cut immediately.
+* **Bitmask prefilter.** Per state, a few masks (columns forced white, runs that
+  die if the new cell is checked or unchecked, component columns, and a
+  row-validity lookup table) reject most candidate rows before the union-find.
+  Only rows that contain every forced column are enumerated.
+* **One sharded concurrent map.** Successors merge into 1024 mutex-guarded
+  shards, so each state is held once instead of once per thread.
+* **Passes.** The last row can be built in `k` passes (`BRITISH_PASSES`), each
+  keeping 1/k of the shards and gluing them before the next. 13×13 uses
+  `k = 4`, with about 168M states per pass. `BRITISH_ROW_PASSES` does the same
+  for the second-to-last row.
+
+**15×15 (open).** Extrapolating the row-to-row growth (×3.5–8), the last rows
+would hold tens of billions of states. That needs an external-memory
+(disk-sharded) transfer step and a multi-day run, or a further state-space
+reduction, not just more passes.
 
 ## Usage
 
@@ -97,9 +121,11 @@ transfer step — a natural next step, not a correctness gap.
 # Count via the DP (American uses the folded transfer matrix; British likewise)
 cargo run --release --bin count -- --style american --n 13
 cargo run --release --bin count -- --style british  --n 9
+BRITISH_PASSES=4 cargo run --release --bin count -- --style british --n 13
 
 # Timing / frontier statistics
 DP_STATS=1 cargo run --release --bin bench -- american 13
+DP_STATS=1 BRITISH_PASSES=4 cargo run --release --bin bench -- british 13
 ```
 
 ## Tests
