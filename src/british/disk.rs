@@ -196,7 +196,8 @@ fn merge_to(old: &Path, mem: &[(Packed, u64)], out: &Path, n: usize) -> usize {
         write_rec(&mut w, &k, c, n).expect("write merge output");
         written += 1;
     }
-    w.flush().expect("flush merge output");
+    let f = w.into_inner().expect("flush merge output");
+    f.sync_all().expect("sync merge output");
     written
 }
 
@@ -244,20 +245,148 @@ impl RowDir {
     }
 }
 
-/// Stream `input` through one transfer step into a new on-disk row.
+// --- checkpointing ----------------------------------------------------------
+//
+// Layout under the data directory:
+//   CONFIG             n / shard count / record format; resume refuses a mismatch
+//   row-init/, rowI/   one directory per finished (or in-progress) row
+//     sNNNN.bin        final shard files (sorted, merged)
+//     rNNNN.bin        run files while the row is being built
+//     tNNNN.bin        next run files during a spill
+//     SPILL            spill written, renames t→r in progress (redo them)
+//     CKPT             last completed checkpoint: input batches merged so far
+//     DONE             row complete (state count)
+//   glue/gNNNN         partial sum of the fused last row for input shard NNNN
+//   RESULT             the final count
+//
+// Every marker is written to a temp file, synced and renamed, so a crash at
+// any point leaves either the previous checkpoint or the next one.
+
+/// Test hook: panic at a named point to simulate a crash.
+static CRASH_AT: Mutex<Option<String>> = Mutex::new(None);
+
+fn crash_point(tag: &str) {
+    let hit = CRASH_AT.lock().unwrap().as_deref() == Some(tag)
+        || std::env::var("BRITISH_DISK_CRASH_AT").as_deref() == Ok(tag);
+    if hit {
+        *CRASH_AT.lock().unwrap() = None;
+        panic!("injected crash at {tag}");
+    }
+}
+
+#[cfg(test)]
+pub(super) fn set_crash(tag: Option<&str>) {
+    *CRASH_AT.lock().unwrap() = tag.map(str::to_owned);
+}
+
+fn write_atomic(path: &Path, text: &str) {
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp).expect("create marker");
+    f.write_all(text.as_bytes()).expect("write marker");
+    f.sync_all().expect("sync marker");
+    fs::rename(&tmp, path).expect("rename marker");
+}
+
+/// Checkpoint: input batches fully merged into the run files, the batch
+/// length they were cut with, and each shard's run-file record count.
+struct Ckpt {
+    batches: usize,
+    batch_len: usize,
+    counts: Vec<usize>,
+}
+
+impl Ckpt {
+    fn save(&self, path: &Path) {
+        let counts: Vec<String> = self.counts.iter().map(|c| c.to_string()).collect();
+        write_atomic(
+            path,
+            &format!(
+                "{} {}\n{}\n",
+                self.batches,
+                self.batch_len,
+                counts.join(" ")
+            ),
+        );
+    }
+    fn load(path: &Path) -> Option<Ckpt> {
+        let text = fs::read_to_string(path).ok()?;
+        let mut lines = text.lines();
+        let mut head = lines.next()?.split_whitespace().map(|x| x.parse::<usize>());
+        let batches = head.next()?.ok()?;
+        let batch_len = head.next()?.ok()?;
+        let counts: Vec<usize> = lines
+            .next()?
+            .split_whitespace()
+            .map(|x| x.parse().expect("bad checkpoint"))
+            .collect();
+        assert_eq!(counts.len(), SHARDS, "checkpoint shard count");
+        Some(Ckpt {
+            batches,
+            batch_len,
+            counts,
+        })
+    }
+}
+
+/// Stream `input` through one transfer step into the on-disk row `out`,
+/// resuming from `out`'s last checkpoint if there is one. Returns the row's
+/// state count.
+#[allow(clippy::too_many_arguments)]
 fn advance_disk(
     ctx: &Ctx,
     input: &RowDir,
-    out: RowDir,
+    out: &RowDir,
     rows: &[u32],
     row: usize,
     budget: usize,
+    ckpt_every: std::time::Duration,
     spills: &AtomicUsize,
-) -> (RowDir, usize) {
+) -> usize {
     let n = ctx.n;
+    let done = out.dir.join("DONE");
+    if let Ok(t) = fs::read_to_string(&done) {
+        return t.trim().parse().expect("bad DONE");
+    }
     fs::create_dir_all(&out.dir).expect("create row dir");
-    let allowed = super::allowed_set(n, rows);
     let run = |s: usize| out.dir.join(format!("r{s:04}.bin"));
+    let tmp = |s: usize| out.dir.join(format!("t{s:04}.bin"));
+    let (spill_mark, ckpt_mark) = (out.dir.join("SPILL"), out.dir.join("CKPT"));
+
+    // Recover: finish an interrupted spill's renames, or drop a partial one.
+    if let Some(c) = Ckpt::load(&spill_mark) {
+        for s in 0..SHARDS {
+            if tmp(s).exists() {
+                fs::rename(tmp(s), run(s)).expect("redo rename");
+            }
+        }
+        c.save(&ckpt_mark);
+        let _ = fs::remove_file(&spill_mark);
+    } else {
+        for s in 0..SHARDS {
+            let _ = fs::remove_file(tmp(s));
+        }
+    }
+    let env_batch = std::env::var("BRITISH_DISK_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(BATCH)
+        .max(1);
+    let mut ck = Ckpt::load(&ckpt_mark).unwrap_or(Ckpt {
+        batches: 0,
+        batch_len: env_batch,
+        counts: vec![0; SHARDS],
+    });
+    let shard_ids: Vec<usize> = (0..SHARDS).collect();
+    let batches: Vec<&[usize]> = shard_ids.chunks(ck.batch_len).collect();
+    if ck.batches > 0 && std::env::var("DP_STATS").is_ok() {
+        eprintln!(
+            "  row {row}: resuming at input batch {}/{}",
+            ck.batches,
+            batches.len()
+        );
+    }
+
+    let allowed = super::allowed_set(n, rows);
     let maps: Vec<Mutex<Map>> = (0..SHARDS).map(|_| Mutex::new(Map::default())).collect();
     let live = AtomicUsize::new(0);
     let flush = |buf: &mut Vec<(Packed, u64)>, s: usize| {
@@ -268,29 +397,46 @@ fn advance_disk(
         }
         live.fetch_add(m.len() - before, Ordering::Relaxed);
     };
-    let tmp = |s: usize| out.dir.join(format!("t{s:04}.bin"));
-    // Compaction: each spill merges into the shard's single run file, so a
-    // shard never holds more than one copy of the distinct states seen so far.
-    let spill = || {
-        maps.par_iter().enumerate().for_each(|(s, m)| {
-            let mut m = m.lock().unwrap();
-            if m.is_empty() {
-                return;
-            }
-            let v = sorted(&mut m);
-            drop(m);
-            merge_to(&run(s), &v, &tmp(s), n);
-            fs::rename(tmp(s), run(s)).expect("replace run file");
-        });
-        live.store(0, Ordering::Relaxed);
+    // Compaction + checkpoint: merge every shard's map into a new run file,
+    // mark the spill, swap the files in, record the checkpoint.
+    let spill = |ck: &mut Ckpt, batches_done: usize| {
+        let counts: Vec<usize> = maps
+            .par_iter()
+            .enumerate()
+            .map(|(s, m)| {
+                let mut m = m.lock().unwrap();
+                if m.is_empty() {
+                    return ck.counts[s];
+                }
+                let v = sorted(&mut m);
+                drop(m);
+                merge_to(&run(s), &v, &tmp(s), n)
+            })
+            .collect();
         spills.fetch_add(1, Ordering::Relaxed);
+        crash_point(&format!("spill-written:{row}:{batches_done}"));
+        let next = Ckpt {
+            batches: batches_done,
+            batch_len: ck.batch_len,
+            counts,
+        };
+        next.save(&spill_mark);
+        for s in 0..SHARDS {
+            if s == SHARDS / 2 {
+                crash_point(&format!("spill-renaming:{row}:{batches_done}"));
+            }
+            if tmp(s).exists() {
+                fs::rename(tmp(s), run(s)).expect("replace run file");
+            }
+        }
+        next.save(&ckpt_mark);
+        let _ = fs::remove_file(&spill_mark);
+        live.store(0, Ordering::Relaxed);
+        *ck = next;
     };
-    let batch_len = std::env::var("BRITISH_DISK_BATCH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(BATCH)
-        .max(1);
-    for batch in (0..SHARDS).collect::<Vec<_>>().chunks(batch_len) {
+
+    let mut last = std::time::Instant::now();
+    for (b, batch) in batches.iter().enumerate().skip(ck.batches) {
         let parts: Vec<Vec<(Packed, u64)>> = batch.par_iter().map(|&s| input.load(s, n)).collect();
         parts.par_iter().for_each_init(
             || vec![Vec::<(Packed, u64)>::new(); SHARDS],
@@ -313,35 +459,99 @@ fn advance_disk(
             },
         );
         drop(parts);
-        if live.load(Ordering::Relaxed) > budget {
-            spill();
+        crash_point(&format!("batch:{row}:{b}"));
+        if live.load(Ordering::Relaxed) > budget || last.elapsed() >= ckpt_every {
+            spill(&mut ck, b + 1);
+            last = std::time::Instant::now();
         }
     }
-    // Final merge: each shard's run file with what is still in memory.
-    let total = AtomicUsize::new(0);
-    maps.into_par_iter().enumerate().for_each(|(s, m)| {
-        let v = sorted(&mut m.into_inner().unwrap());
-        total.fetch_add(merge_to(&run(s), &v, &out.shard(s), n), Ordering::Relaxed);
-        let _ = fs::remove_file(run(s));
-    });
-    (out, total.into_inner())
+    // Final checkpoint (all batches merged), then the run files become the
+    // row's shard files. Renames are idempotent, so this is safe to redo.
+    if ck.batches < batches.len() || live.load(Ordering::Relaxed) > 0 {
+        spill(&mut ck, batches.len());
+    }
+    for s in 0..SHARDS {
+        if s == SHARDS / 2 {
+            crash_point(&format!("finalizing:{row}"));
+        }
+        if run(s).exists() {
+            fs::rename(run(s), out.shard(s)).expect("finalize shard");
+        }
+    }
+    let total: usize = ck.counts.iter().sum();
+    write_atomic(&done, &format!("{total}\n"));
+    let _ = fs::remove_file(&ckpt_mark);
+    total
 }
 
 /// Count British grids with every row stored on disk under `dir`.
-pub(super) fn count(ctx: &Ctx, rows: &[u32], dir: &Path, budget: usize, stats: bool) -> u128 {
+///
+/// Resumes automatically from whatever `dir` holds (finished rows, the last
+/// checkpoint of a row in progress, finished last-row shards) as long as its
+/// `CONFIG` matches; `fresh` wipes it first. A crash loses at most the work
+/// since the last checkpoint (every spill, and at least every `ckpt_every`).
+pub(super) fn count(
+    ctx: &Ctx,
+    rows: &[u32],
+    dir: &Path,
+    budget: usize,
+    ckpt_every: std::time::Duration,
+    fresh: bool,
+    stats: bool,
+) -> u128 {
     let n = ctx.n;
     let h = (n - 1) / 2;
     let t0 = std::time::Instant::now();
+    let config = format!("n={n} shards={SHARDS} format=1\n");
+    if fresh {
+        let _ = fs::remove_dir_all(dir);
+    }
+    match fs::read_to_string(dir.join("CONFIG")) {
+        Ok(c) if c == config => {
+            if stats {
+                eprintln!("  resuming from {}", dir.display());
+            }
+        }
+        Ok(c) => panic!(
+            "{} holds a different run ({}); set BRITISH_DISK_FRESH=1 to discard it",
+            dir.display(),
+            c.trim()
+        ),
+        Err(_) => {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).expect("create data dir");
+            write_atomic(&dir.join("CONFIG"), &config);
+        }
+    }
+    if let Ok(r) = fs::read_to_string(dir.join("RESULT")) {
+        return r.trim().parse().expect("bad RESULT");
+    }
     let spills = AtomicUsize::new(0);
-    let row_dir = |i: usize| RowDir {
-        dir: dir.join(format!("row{i}")),
+    let row_dir = |i: Option<usize>| RowDir {
+        dir: dir.join(match i {
+            Some(i) => format!("row{i}"),
+            None => "row-init".to_string(),
+        }),
     };
-    let _ = fs::remove_dir_all(dir);
-    let mut cur = row_dir(usize::MAX);
-    fs::create_dir_all(&cur.dir).expect("create dir");
-    write_all(&cur.shard(0), &[([0, 0], 1)], n);
-    for i in 0..h - 1 {
-        let (next, states) = advance_disk(ctx, &cur, row_dir(i), rows, i, budget, &spills);
+    // Start after the latest finished row (earlier rows are already deleted).
+    let first = (0..h - 1)
+        .rev()
+        .find(|&i| row_dir(Some(i)).dir.join("DONE").exists())
+        .map_or(0, |i| i + 1);
+    let mut cur = row_dir(first.checked_sub(1));
+    if first == 0 && !cur.dir.join("DONE").exists() {
+        fs::create_dir_all(&cur.dir).expect("create dir");
+        write_all(&cur.shard(0), &[([0, 0], 1)], n);
+        write_atomic(&cur.dir.join("DONE"), "1\n");
+    }
+    for i in 0..first.saturating_sub(1) {
+        let _ = fs::remove_dir_all(row_dir(Some(i)).dir); // leftovers of a crash
+    }
+    for i in first..h - 1 {
+        let next = row_dir(Some(i));
+        let states = advance_disk(ctx, &cur, &next, rows, i, budget, ckpt_every, &spills);
+        crash_point(&format!("row-done:{i}"));
+        let _ = fs::remove_dir_all(&cur.dir);
         if stats {
             eprintln!(
                 "  row {i}: {states} states, {:.1} MB on disk, {} spills so far ({:.2?})",
@@ -350,22 +560,35 @@ pub(super) fn count(ctx: &Ctx, rows: &[u32], dir: &Path, budget: usize, stats: b
                 t0.elapsed()
             );
         }
-        let _ = fs::remove_dir_all(&cur.dir);
         cur = next;
     }
+    // Fused last row, one input shard at a time; each shard's partial sum is
+    // saved so a restart skips it.
     let centers: Vec<u32> = rows
         .iter()
         .copied()
         .filter(|&m| is_palindrome(m, n))
         .collect();
     let allowed = super::allowed_set(n, rows);
+    let glue = dir.join("glue");
+    fs::create_dir_all(&glue).expect("create glue dir");
     let total: u128 = (0..SHARDS)
         .into_par_iter()
-        .map(|s| advance_glue_part(ctx, &cur.load(s, n), h - 1, &allowed, &centers))
+        .map(|s| {
+            let g = glue.join(format!("g{s:04}"));
+            if let Ok(t) = fs::read_to_string(&g) {
+                return t.trim().parse::<u128>().expect("bad glue sum");
+            }
+            let sum = advance_glue_part(ctx, &cur.load(s, n), h - 1, &allowed, &centers);
+            write_atomic(&g, &format!("{sum}\n"));
+            crash_point(&format!("glue:{s}"));
+            sum
+        })
         .sum();
+    write_atomic(&dir.join("RESULT"), &format!("{total}\n"));
+    let _ = fs::remove_dir_all(&cur.dir);
     if stats {
         eprintln!("  row {} fused with glue ({:.2?})", h - 1, t0.elapsed());
     }
-    let _ = fs::remove_dir_all(dir);
     total
 }

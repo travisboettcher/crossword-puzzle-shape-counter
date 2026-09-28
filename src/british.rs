@@ -1120,7 +1120,19 @@ pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(50_000_000);
-        return disk::count(&ctx, &rows, std::path::Path::new(&dir), budget, instrument);
+        let minutes: u64 = std::env::var("BRITISH_CKPT_MINUTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        return disk::count(
+            &ctx,
+            &rows,
+            std::path::Path::new(&dir),
+            budget,
+            std::time::Duration::from_secs(60 * minutes),
+            std::env::var("BRITISH_DISK_FRESH").is_ok(),
+            instrument,
+        );
     }
     let t0 = std::time::Instant::now();
     let total_len = |p: &[Vec<(Packed, u64)>]| p.iter().map(Vec::len).sum::<usize>();
@@ -1446,7 +1458,35 @@ mod tests {
         for (n, want) in [(5usize, 17u128), (7, 650), (9, 68_956), (11, 60_384_181)] {
             let ctx = Ctx::new(n);
             let rows = allowed_rows(n);
-            assert_eq!(disk::count(&ctx, &rows, &dir, 1000, false), want, "n={n}");
+            let hour = std::time::Duration::from_secs(3600);
+            assert_eq!(
+                disk::count(&ctx, &rows, &dir, 1000, hour, true, false),
+                want,
+                "n={n}"
+            );
+        }
+        // Crash anywhere, resume, and still get the exact count. With this
+        // budget every input batch spills, so every crash point is reached.
+        let (n, want) = (9usize, 68_956u128);
+        let ctx = Ctx::new(n);
+        let rows = allowed_rows(n);
+        let hour = std::time::Duration::from_secs(3600);
+        for tag in [
+            "batch:1:5",           // mid-row, work since the last checkpoint is lost
+            "spill-written:2:16",  // new run files written, not yet marked
+            "spill-renaming:1:16", // marked, half the files swapped in
+            "finalizing:1",        // half the run files renamed to shard files
+            "row-done:0",          // row finished, previous row not yet deleted
+            "glue:700",            // some last-row shards summed
+        ] {
+            disk::set_crash(Some(tag));
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                disk::count(&ctx, &rows, &dir, 1000, hour, true, false)
+            }));
+            assert!(crashed.is_err(), "crash point {tag} never reached");
+            disk::set_crash(None);
+            let got = disk::count(&ctx, &rows, &dir, 1000, hour, false, false);
+            assert_eq!(got, want, "resume after crash at {tag}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

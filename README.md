@@ -138,6 +138,7 @@ hash-map inserts 8%.
 |---|---|
 | Merge run statistics with identical futures | ✅ kept: −10% states, 18 → 12.5 min at 13×13; the statistic is otherwise minimal |
 | Rows on disk (`BRITISH_DISK_DIR`, `BRITISH_DISK_BUDGET`): 1024 sorted shard files per row; budgeted hash maps spill sorted runs, merged per shard | ✅ kept: 13×13 in 13.2 min / 1.9 GB vs 12.5 min / 7.3 GB in memory (+5% time, −74% RAM) |
+| Checkpoint / resume (disk mode) | ✅ kept: finished rows are marked `DONE`; every spill is a checkpoint (plus at least every `BRITISH_CKPT_MINUTES`, default 30); spills are write → mark → rename so a crash leaves the old or the new checkpoint; each last-row shard's partial sum is saved. Rerunning with the same `BRITISH_DISK_DIR` resumes. Tested by injected crashes at six points (unit test) and a `kill -9` mid-row at 13×13 |
 | Spill-run compaction: each spill stream-merges into the shard's single run file | ✅ kept: without it, building a row peaked at 4.4× the finished row on disk (13×13 row 4: 10.3 GB for a 2.25 GB row); with it, 1.08× (2.4 GB). Costs rewrite I/O per spill: +23% row time at a 20M budget (17 spills), +0% at 60M (8 spills) |
 | Compact records: 7 bits/column (5-bit run code + 2-bit non-crossing connectivity code) + varint count | ✅ kept as the disk format: ~13–15 bytes/state vs 24. No in-memory gain possible (a 12-byte key + 8-byte count still pads to 24) |
 | Sort-and-reduce aggregation in memory instead of hash maps | ❌ 6% slower, 14% more RAM at 13×13 row 4; used only for disk runs |
@@ -167,7 +168,10 @@ cargo run --release --bin count -- --style american --n 13
 cargo run --release --bin count -- --style british  --n 9
 cargo run --release --bin count -- --style british --n 13   # ~12.5 min, 7 GB
 
-# Rows on disk: bounded RAM (budget = hash-map entries before spilling)
+# Rows on disk: bounded RAM (budget = hash-map entries before spilling).
+# Rerunning with the same directory resumes after a crash or kill;
+# BRITISH_DISK_FRESH=1 discards it. BRITISH_CKPT_MINUTES (default 30) bounds
+# the work lost; BRITISH_DISK_BATCH sets input shards loaded at once.
 BRITISH_DISK_DIR=/path/to/scratch BRITISH_DISK_BUDGET=60000000 \
   cargo run --release --bin count -- --style british --n 13   # ~12.6 min, 3.7 GB RAM, 2.5 GB disk
 
