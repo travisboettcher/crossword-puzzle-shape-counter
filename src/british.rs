@@ -48,6 +48,9 @@ use rayon::prelude::*;
 
 use crate::rules::{word_checks_ok, Style};
 
+mod cell;
+mod disk;
+
 const MAXN: usize = 15;
 const SLOTS: usize = MAXN + 1;
 const DBIAS: i8 = 4;
@@ -857,16 +860,25 @@ fn advance_glue(
     let allowed = allowed_set(ctx.n, rows);
     input
         .par_iter()
-        .map(|part| {
-            let mut local = 0u128;
-            for (p, cnt) in part {
-                successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
-                    local += *cnt as u128 * glue_count(ctx, &ns, centers) as u128;
-                });
-            }
-            local
-        })
+        .map(|part| advance_glue_part(ctx, part, row, &allowed, centers))
         .sum()
+}
+
+/// [`advance_glue`] for one input part.
+fn advance_glue_part(
+    ctx: &Ctx,
+    part: &[(Packed, u64)],
+    row: usize,
+    allowed: &[bool],
+    centers: &[u32],
+) -> u128 {
+    let mut local = 0u128;
+    for (p, cnt) in part {
+        successors(ctx, &ctx.unpack(p), row, allowed, |ns| {
+            local += *cnt as u128 * glue_count(ctx, &ns, centers) as u128;
+        });
+    }
+    local
 }
 
 /// Split `w` into its maximal runs of ones; returns how many.
@@ -1055,6 +1067,21 @@ fn advance(
     shards
 }
 
+/// Sort `v` by key and sum the counts of equal keys, in place.
+fn sort_reduce(v: &mut Vec<(Packed, u64)>) {
+    v.sort_unstable_by_key(|e| e.0);
+    let mut w = 0usize;
+    for r in 0..v.len() {
+        if w > 0 && v[w - 1].0 == v[r].0 {
+            v[w - 1].1 += v[r].1;
+        } else {
+            v[w] = v[r];
+            w += 1;
+        }
+    }
+    v.truncate(w);
+}
+
 /// Flatten shard maps into plain vectors (24 bytes per state, no table
 /// overhead), freeing each map as soon as it is copied.
 fn into_parts(shards: Vec<Mutex<Map>>) -> Vec<Vec<(Packed, u64)>> {
@@ -1103,6 +1130,13 @@ pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
     let ctx = Ctx::new(n);
 
     let instrument = std::env::var("DP_STATS").is_ok();
+    if let Ok(dir) = std::env::var("BRITISH_DISK_DIR") {
+        let budget = std::env::var("BRITISH_DISK_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_000_000);
+        return disk::count(&ctx, &rows, std::path::Path::new(&dir), budget, instrument);
+    }
     let t0 = std::time::Instant::now();
     let total_len = |p: &[Vec<(Packed, u64)>]| p.iter().map(Vec::len).sum::<usize>();
     let mut parts: Vec<Vec<(Packed, u64)>> = vec![vec![([0, 0], 1)]];
@@ -1111,7 +1145,15 @@ pub fn count_with_passes(n: usize, row_passes: usize, passes: usize) -> u128 {
         let mut next: Vec<Vec<(Packed, u64)>> = Vec::new();
         for pass in 0..k {
             let keep = move |s: usize| s % k == pass;
-            next.extend(into_parts(advance(&ctx, &parts, &rows, i, &keep)));
+            if k == 1 && std::env::var("BRITISH_CELL").is_ok() {
+                let (out, widest) = cell::advance_cells(&ctx, &parts, i);
+                if instrument {
+                    eprintln!("    row {i}: widest mid-row layer {widest}");
+                }
+                next.extend(out);
+            } else {
+                next.extend(into_parts(advance(&ctx, &parts, &rows, i, &keep)));
+            }
             if instrument && k > 1 {
                 eprintln!("  row {i} pass {pass}/{k} ({:.2?})", t0.elapsed());
             }
@@ -1354,6 +1396,17 @@ mod tests {
                 }
                 frontier = next.into_iter().collect();
             }
+            // ...cell-by-cell transfer must reproduce each row exactly...
+            // (checked separately below in `cell_matches_row`)
+            // ...the compact on-disk encoding must round-trip every frontier...
+            for st in &frontier {
+                let p = ctx.pack_canon(st);
+                assert_eq!(
+                    disk::expand(disk::compact(&p, n), n),
+                    p,
+                    "n={n} state={st:?}"
+                );
+            }
             // ...and fast gluing must agree with the reference on every
             // last-row frontier and every palindromic center row.
             let centers: Vec<u32> = rows
@@ -1372,6 +1425,30 @@ mod tests {
                         "n={n} c={c:b} state={st:?}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Cell-by-cell and row-by-row transfer produce identical frontier sets
+    /// and counts after every row.
+    #[test]
+    fn cell_matches_row() {
+        for n in [5usize, 7, 9, 11] {
+            let ctx = Ctx::new(n);
+            let rows = allowed_rows(n);
+            let mut parts: Vec<Vec<(Packed, u64)>> = vec![vec![([0, 0], 1)]];
+            for i in 0..(n - 1) / 2 - 1 {
+                let by_row: std::collections::BTreeMap<_, _> =
+                    into_parts(advance(&ctx, &parts, &rows, i, &|_| true))
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                let (cells, _) = cell::advance_cells(&ctx, &parts, i);
+                let by_cell: std::collections::BTreeMap<_, _> =
+                    cells.into_iter().flatten().collect();
+                assert_eq!(by_row.len(), by_cell.len(), "n={n} row={i}");
+                assert!(by_row == by_cell, "n={n} row={i}: state sets differ");
+                parts = vec![by_row.into_iter().collect()];
             }
         }
     }
