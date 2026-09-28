@@ -51,15 +51,16 @@ die() { say "ERROR: $*"; exit 1; }
 mem_avail_gb() { awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo; }
 disk_free_gb() { mkdir -p "$1"; df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 
-# Hash-map entries cost ~40 bytes each in practice; give them ~45% of free RAM.
-auto_budget() { echo "${BUDGET:-$(( $(mem_avail_gb) * 1073741824 * 45 / 100 / 40 ))}"; }
-# A 15x15 row-5 input shard is ~600 MB in memory; give batches ~25% of free RAM.
+# Hash-map entries measured at 60-90 bytes each (RSS / budget on 13x13 and
+# 15x15 runs); budget ~45% of free RAM at 100 bytes/entry. The rest covers the
+# overshoot of one batch (the budget is checked between batches), sort buffers
+# during spills and the loaded input shards.
+auto_budget() { echo "${BUDGET:-$(( $(mem_avail_gb) * 1073741824 * 45 / 100 / 100 ))}"; }
+# One input shard per batch at 15x15: a row-4 shard alone yields ~10^8 new
+# row-5 states (~9 GB). Smaller sizes can afford bigger batches.
 auto_batch() {
     if [[ -n "${BATCH:-}" ]]; then echo "$BATCH"; return; fi
-    local b=$(( $(mem_avail_gb) * 250 / 600 ))
-    (( b < 1 )) && b=1
-    (( b > 64 )) && b=64
-    echo "$b"
+    if (( N >= 15 )); then echo 1; else echo 8; fi
 }
 
 machine_info() {

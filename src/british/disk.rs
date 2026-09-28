@@ -29,10 +29,14 @@ use super::{
     STAT_BITS,
 };
 
-/// Input shards loaded into memory at once while building a row (default;
-/// `BRITISH_DISK_BATCH` overrides). Each loaded state takes 24 bytes, so at
-/// 15×15 row 5 (~25M states per shard) 64 shards would need ~38 GB.
-const BATCH: usize = 64;
+/// Input shards per batch (default; `BRITISH_DISK_BATCH` overrides). The memory
+/// budget is only checked between batches, so one batch's new states can
+/// overshoot it: keep batches small when a row is large. At 15×15, one row-4
+/// input shard yields ~10^8 new row-5 states (~9 GB of maps).
+const BATCH: usize = 8;
+
+/// Input states per parallel work item.
+const CHUNK: usize = 16384;
 
 // --- compact record encoding (E6) -------------------------------------------
 
@@ -467,10 +471,14 @@ fn advance_disk(
                 }
             })
             .collect();
-        parts.par_iter().for_each_init(
+        // Parallelise within shards too, so a batch of one shard still uses
+        // every core (small batches bound how far a batch can overshoot the
+        // memory budget, which is only checked between batches).
+        let chunks: Vec<&[(Packed, u64)]> = parts.iter().flat_map(|p| p.chunks(CHUNK)).collect();
+        chunks.par_iter().for_each_init(
             || vec![Vec::<(Packed, u64)>::new(); SHARDS],
             |bufs, part| {
-                for (p, cnt) in part {
+                for (p, cnt) in part.iter() {
                     successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
                         let pk = ctx.pack_canon(&ns);
                         let s = shard_of(&pk);
