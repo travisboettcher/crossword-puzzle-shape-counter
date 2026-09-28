@@ -37,7 +37,7 @@ fn british_passes_do_not_change_count() {
 }
 
 #[test]
-#[ignore = "slow: ~18 min on 4 cores, ~7 GB peak; 24M/191M frontier states"]
+#[ignore = "slow: ~12.5 min on 4 cores, ~7 GB peak; 22M/171M frontier states"]
 fn british_paper_count_13() {
     // The last row is glued as it is generated (never stored).
     assert_eq!(british::count_with_passes(13, 1, 0), 162_468_835_136);

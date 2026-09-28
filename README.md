@@ -76,7 +76,7 @@ value. Timings are wall-clock on 4 cores.
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
 | 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~5 s) |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~18 min, 7 GB) |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~12.5 min, 7 GB; or 13 min, 1.9 GB on disk) |
 | 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | — |
 
 American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
@@ -85,9 +85,10 @@ through 13×13.
 ### British 13×13 — how it fits (and how fast)
 
 The British frontier grows steeply. The top half of a 13×13 grid passes through
-1.6K → 119K → 1.6M → 24M → 191M states (rows 0–4). Its last row (672M distinct
-states) is never stored: each successor is glued to the center as soon as it is
-generated. The run takes **18 min on 4 cores with a 7.3 GB peak**. The first
+1.6K → 119K → 1.6M → 22M → 171M states (rows 0–4). Its last row is never
+stored: each successor is glued to the center as soon as it is generated. The
+run takes **12.5 min on 4 cores with a 7.3 GB peak** (13 min and 1.9 GB with
+rows on disk). The first
 version of this DP ran out of memory past ~16 GB; the first working version
 took 1 h 59 min and 11.9 GB.
 
@@ -99,6 +100,11 @@ took 1 h 59 min and 11.9 GB.
   halves both the states and the work.
 * **Dead-run pruning.** A vertical run whose statistic cannot be completed in
   the cells left in its column is cut immediately.
+* **Equivalent run statistics merged** (`Ctx::build_canon`). A bounded-horizon
+  bisimulation finds run statistics that behave identically from each row on;
+  new cells store the class representative. Only one merge exists
+  ((len ≥ 3, trail 0, d 2) ~ (len 2, trail 0, d 2)), but it removes ~10% of
+  states (13×13 row 4: 191M → 171M).
 * **Exact bitmask prefilter.** Per state, a few masks (columns forced white, runs
   that die if the new cell is checked or unchecked, component columns, and a
   row-validity lookup table) decide every rule for a candidate row. Only rows
@@ -126,16 +132,25 @@ Timing breakdown before the step/glue rewrite (11×11, last row): enumerating
 and prefiltering candidates 9%, building successors 51%, packing 30%, and
 hash-map inserts 8%.
 
-**15×15 (open).** Rows grew ×18–28 from 11×11 to 13×13 at the same row
-index, which projects roughly 0.5B / 6B / 25B states for 15×15 rows 3–5 and
-~100B successors into the last row. CPU cost per input state for the last
-row rose from ~9 µs (11×11) to ~29 µs (13×13); at a projected ~90 µs, 15×15 is
-roughly 800 CPU-hours (about a week on 4 cores, about half a day on 64). That is
-a rough extrapolation from two data points. Row 5 alone (~600 GB packed) also
-needs disk-sharded storage. Candidates for real speedups:
-a cell-by-cell (broken-profile) transfer instead of row-by-row, merging run
-statistics with identical futures, and a many-core machine (the transfer is
-embarrassingly parallel).
+### Scaling experiments (toward 15×15)
+
+| experiment | outcome |
+|---|---|
+| Merge run statistics with identical futures | ✅ kept: −10% states, 18 → 12.5 min at 13×13; the statistic is otherwise minimal |
+| Rows on disk (`BRITISH_DISK_DIR`, `BRITISH_DISK_BUDGET`): 1024 sorted shard files per row; budgeted hash maps spill sorted runs, merged per shard | ✅ kept: 13×13 in 13.2 min / 1.9 GB vs 12.5 min / 7.3 GB in memory (+5% time, −74% RAM) |
+| Compact records: 7 bits/column (5-bit run code + 2-bit non-crossing connectivity code) + varint count | ✅ kept as the disk format: ~13–15 bytes/state vs 24. No in-memory gain possible (a 12-byte key + 8-byte count still pads to 24) |
+| Sort-and-reduce aggregation in memory instead of hash maps | ❌ 6% slower, 14% more RAM at 13×13 row 4; used only for disk runs |
+| Cell-by-cell (broken-profile) transfer (`BRITISH_CELL=1`) | ❌ identical states (unit-tested) but 6.6× slower: ~30M hash merges for 11×11 row 3 vs ~2.4M row successors, because the exact row prefilter never builds dead rows |
+
+**Measured 15×15 frontier** (disk mode, 4 cores, 7.4 GB RAM): rows 0–3 hold
+5.5K → 865K → 17.8M → **386M** states (row 3: 173 s, 5.8 GB on disk). The
+growth factor per row is nearly identical from 11→13 and 13→15 (×7.3/7.2,
+×11.6/11.4, ×17.7/17.5), so the projection is fairly tight: row 4 ≈ 4.7B states
+(~70 GB), row 5 ≈ 25B (~375 GB), then the fused last row. CPU cost per input
+state grows ~3× from 13×13 to 15×15 at the same row, giving roughly
+**500–800 CPU-hours** in total, about 60% of it in the fused last row. That is
+~5–8 days on this 4-core box, or ~8–13 hours on 64 cores, with ~0.5–1 TB of
+disk.
 
 ## Usage
 
@@ -143,7 +158,11 @@ embarrassingly parallel).
 # Count via the DP (American uses the folded transfer matrix; British likewise)
 cargo run --release --bin count -- --style american --n 13
 cargo run --release --bin count -- --style british  --n 9
-cargo run --release --bin count -- --style british --n 13   # ~18 min
+cargo run --release --bin count -- --style british --n 13   # ~12.5 min, 7 GB
+
+# Rows on disk: bounded RAM (budget = hash-map entries before spilling)
+BRITISH_DISK_DIR=/path/to/scratch BRITISH_DISK_BUDGET=20000000 \
+  cargo run --release --bin count -- --style british --n 13   # ~13 min, 1.9 GB
 
 # Timing / frontier statistics
 DP_STATS=1 cargo run --release --bin bench -- american 13
@@ -166,6 +185,8 @@ cargo test --release -- --ignored # slow anchors (n = 13, 15; British 11, 13)
 | `src/brute.rs` | reference enumerators (symmetric and non-symmetric) |
 | `src/dp.rs` | American folded transfer-matrix DP + non-symmetric DP |
 | `src/british.rs` | British folded DP with the checked-letter word rules |
+| `src/british/disk.rs` | rows on disk: sharded spill/merge, compact record encoding |
+| `src/british/cell.rs` | cell-by-cell transfer (experiment; slower, kept as a cross-check) |
 | `src/bin/count.rs` | CLI |
 
 ## References

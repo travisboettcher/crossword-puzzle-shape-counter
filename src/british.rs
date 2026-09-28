@@ -1097,7 +1097,7 @@ fn into_parts(shards: Vec<Mutex<Map>>) -> Vec<Vec<(Packed, u64)>> {
 /// * `BRITISH_PASSES=0` (the default for n ≥ 13) glues each last-row successor
 ///   as it is generated, so that row is never stored or merged. It glues more
 ///   often (once per successor, not per distinct state) but needs no memory
-///   for that row and no repeated passes. 13×13: ~18 min, 7 GB.
+///   for that row and no repeated passes. 13×13: ~12.5 min, 7 GB.
 /// * `BRITISH_PASSES=k ≥ 1` (default 1 below 13) builds the last row in `k`
 ///   passes, each keeping 1/k of its shards and gluing them before moving on —
 ///   k× the work of that transfer step for 1/k of its peak memory.
