@@ -155,11 +155,15 @@ are the 180° image. Peak disk is while building row 5: ~70 GB + ~1.08 × 375 GB
 ≈ **475 GB** with compaction. Spills rewrite each shard's run file, so extra
 I/O grows with the number of spills (at most one per input batch). Give the
 budget as much RAM as possible, and set `BRITISH_DISK_BATCH` so a batch of
-input shards fits in RAM (~600 MB per row-5 shard). CPU cost per input
-state grows ~3× from 13×13 to 15×15 at the same row, giving roughly
-**500–800 CPU-hours** in total, about 60% of it in the fused last row. That is
-~5–8 days on this 4-core box, or ~8–13 hours on 64 cores, with ~0.5–1 TB of
-disk.
+input shards fits in RAM (~600 MB per row-5 shard). **Measured 15×15 per-state costs** (rehearsal: 1/1024 of row-4 input,
+all of row 5 generated, 1/1024 of it stored and glued): building row 5 costs
+**35 µs of CPU per row-4 state**, and the fused last row costs **149 µs per
+row-5 state** (~10× its 13×13 cost). With row 4 ≈ 4.7B and row 5 ≈ 25B
+states, that is ~50–90 CPU-hours for row 5 and **~1,000 CPU-hours for the last
+row** (600–1,500, mostly from the uncertainty in the row-5 size): roughly
+**700–1,700 CPU-hours in total**, ~90% in the last row. (An earlier rehearsal
+at a tiny memory budget measured ~680 µs per row-4 state; that was compaction
+rewriting a 14 GB run file every few shards, not computation.)
 
 ## Usage
 

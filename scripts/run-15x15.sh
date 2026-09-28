@@ -138,10 +138,14 @@ cmd_scaling() {
 
 cmd_rehearse() {
     build
-    # sample the input of the last stored row (row 4 of 15x15's rows 0..5)
-    local row=$(( (N - 1) / 2 - 2 ))
-    say "rehearsal: ${N}x${N}, 1/1024 of row-$row input, through the last row (NOT a count)"
-    N_RUN=$N count "$DATA_DIR-rehearsal" BRITISH_DISK_FRESH=1 BRITISH_SAMPLE=$row:1024 \
+    # 15x15 stores rows 0..5 and glues row 6: read 1/1024 of the input when
+    # building row 4, generate all of row 5 from it but store 1/1024, then
+    # glue those. Per-state costs of rows 5 and 6 come out of the log.
+    local h=$(( (N - 1) / 2 ))
+    local r_in=$(( h - 3 )) r_out=$(( h - 2 ))
+    say "rehearsal: ${N}x${N}, 1/1024 of row-$r_in input, 1/1024 of row-$r_out output (NOT a count)"
+    N_RUN=$N count "$DATA_DIR-rehearsal" BRITISH_DISK_FRESH=1 \
+        BRITISH_SAMPLE=$r_in:1024 BRITISH_SAMPLE_OUT=$r_out:1024 \
         | tee "$RESULTS_DIR/rehearsal-${N}.log"
     rm -rf "$DATA_DIR-rehearsal"
     say "rehearsal finished; per-row timings in $RESULTS_DIR/rehearsal-${N}.log"

@@ -279,6 +279,16 @@ fn r_k(k: &str) -> usize {
     k.parse::<usize>().expect("sample k").max(1)
 }
 
+/// Output sampling (`BRITISH_SAMPLE_OUT=row:k`): when building `row`, generate
+/// every successor but store only those in every `k`-th output shard. Measures
+/// the full generation cost of a row while storing (and later gluing) a
+/// sample of it. Also **not** a count.
+fn sample_out() -> Option<(usize, usize)> {
+    let v = std::env::var("BRITISH_SAMPLE_OUT").ok()?;
+    let (r, k) = v.split_once(':').expect("BRITISH_SAMPLE_OUT=row:k");
+    Some((r.parse().expect("sample row"), r_k(k)))
+}
+
 fn keep_input(row: usize, s: usize) -> bool {
     match sample() {
         Some((r, k)) if r == row => s.is_multiple_of(k),
@@ -411,6 +421,10 @@ fn advance_disk(
     }
 
     let allowed = super::allowed_set(n, rows);
+    let keep_k = match sample_out() {
+        Some((r, k)) if r == row => k,
+        _ => 1,
+    };
     let maps: Vec<Mutex<Map>> = (0..SHARDS).map(|_| Mutex::new(Map::default())).collect();
     let live = AtomicUsize::new(0);
     let flush = |buf: &mut Vec<(Packed, u64)>, s: usize| {
@@ -482,6 +496,9 @@ fn advance_disk(
                     successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
                         let pk = ctx.pack_canon(&ns);
                         let s = shard_of(&pk);
+                        if keep_k > 1 && !s.is_multiple_of(keep_k) {
+                            return;
+                        }
                         bufs[s].push((pk, *cnt));
                         if bufs[s].len() >= FLUSH {
                             flush(&mut bufs[s], s);
@@ -543,7 +560,11 @@ pub(super) fn count(
         None => format!("n={n} shards={SHARDS} format=1\n"),
         Some((r, k)) => format!("n={n} shards={SHARDS} format=1 SAMPLE row={r} keep=1/{k}\n"),
     };
-    if sample().is_some() && stats {
+    let config = match sample_out() {
+        None => config,
+        Some((r, k)) => format!("{} SAMPLE_OUT row={r} keep=1/{k}\n", config.trim_end()),
+    };
+    if (sample().is_some() || sample_out().is_some()) && stats {
         eprintln!("  REHEARSAL (BRITISH_SAMPLE): the result below is NOT a grid count");
     }
     if fresh {
