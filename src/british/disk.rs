@@ -262,6 +262,26 @@ impl RowDir {
 // Every marker is written to a temp file, synced and renamed, so a crash at
 // any point leaves either the previous checkpoint or the next one.
 
+/// Rehearsal sampling (`BRITISH_SAMPLE=row:k`): when building grid row `row`,
+/// read only every `k`-th input shard. Everything downstream is exercised on
+/// real states at full width, but the result is **not** a count.
+fn sample() -> Option<(usize, usize)> {
+    let v = std::env::var("BRITISH_SAMPLE").ok()?;
+    let (r, k) = v.split_once(':').expect("BRITISH_SAMPLE=row:k");
+    Some((r.parse().expect("sample row"), r_k(k)))
+}
+
+fn r_k(k: &str) -> usize {
+    k.parse::<usize>().expect("sample k").max(1)
+}
+
+fn keep_input(row: usize, s: usize) -> bool {
+    match sample() {
+        Some((r, k)) if r == row => s % k == 0,
+        _ => true,
+    }
+}
+
 /// Test hook: panic at a named point to simulate a crash.
 static CRASH_AT: Mutex<Option<String>> = Mutex::new(None);
 
@@ -437,7 +457,16 @@ fn advance_disk(
 
     let mut last = std::time::Instant::now();
     for (b, batch) in batches.iter().enumerate().skip(ck.batches) {
-        let parts: Vec<Vec<(Packed, u64)>> = batch.par_iter().map(|&s| input.load(s, n)).collect();
+        let parts: Vec<Vec<(Packed, u64)>> = batch
+            .par_iter()
+            .map(|&s| {
+                if keep_input(row, s) {
+                    input.load(s, n)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
         parts.par_iter().for_each_init(
             || vec![Vec::<(Packed, u64)>::new(); SHARDS],
             |bufs, part| {
@@ -502,7 +531,13 @@ pub(super) fn count(
     let n = ctx.n;
     let h = (n - 1) / 2;
     let t0 = std::time::Instant::now();
-    let config = format!("n={n} shards={SHARDS} format=1\n");
+    let config = match sample() {
+        None => format!("n={n} shards={SHARDS} format=1\n"),
+        Some((r, k)) => format!("n={n} shards={SHARDS} format=1 SAMPLE row={r} keep=1/{k}\n"),
+    };
+    if sample().is_some() && stats {
+        eprintln!("  REHEARSAL (BRITISH_SAMPLE): the result below is NOT a grid count");
+    }
     if fresh {
         let _ = fs::remove_dir_all(dir);
     }

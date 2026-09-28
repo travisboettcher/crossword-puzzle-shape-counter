@@ -181,6 +181,28 @@ DP_STATS=1 cargo run --release --bin bench -- american 13
 DP_STATS=1 cargo run --release --bin bench -- british 13
 ```
 
+## Running 15×15
+
+`scripts/run-15x15.sh` drives the whole run on a large machine (target: 64+
+cores, 128 GB+ RAM, ~1 TB local NVMe; peak disk ~475 GB):
+
+```sh
+export DATA_DIR=/nvme/crossword-data RESULTS_DIR=~/crossword-results
+scripts/run-15x15.sh check      # resources, build, fast tests
+scripts/run-15x15.sh smoke      # 13×13 must give 162,468,835,136
+scripts/run-15x15.sh scaling    # 13×13 at 1/8 … all cores
+scripts/run-15x15.sh rehearse   # 15×15 on a 1/1024 sample to the end (not a count)
+scripts/run-15x15.sh run        # the real count, in the background
+scripts/run-15x15.sh status     # progress; rerun `run` to resume after a crash
+scripts/run-15x15.sh verify     # second run, different merge order: same sums?
+scripts/run-15x15.sh export     # small .tar.gz of logs, result, per-shard sums
+```
+
+Memory budget and batch size are derived from free RAM (override with
+`BUDGET` / `BATCH`). `BRITISH_SAMPLE=row:k` (used by `rehearse`) reads only
+every k-th input shard when building `row`, which exercises every code path at
+full width but does not produce a count.
+
 ## Tests
 
 ```sh
