@@ -81,6 +81,10 @@ run_env() {
 
 build() {
     command -v cargo >/dev/null || die "cargo not found; install Rust: curl https://sh.rustup.rs -sSf | sh"
+    local v; v=$(rustc --version | awk '{print $2}')
+    [[ "$(printf '%s\n' 1.87.0 "$v" | sort -V | head -1)" == 1.87.0 ]] ||
+        die "rustc $v is too old (need >= 1.87); run: rustup update stable"
+    command -v cc >/dev/null || die "no C linker (cc); install: sudo apt install -y build-essential"
     say "building (release)"
     (cd "$REPO" && cargo build --release --quiet)
 }

@@ -2,6 +2,7 @@
 name = "crossword-grids"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"  # u*::is_multiple_of
 description = "Counting valid n×n American- and British-style crossword grids via a transfer-matrix / frontier DP"
 license = "MIT"
 
