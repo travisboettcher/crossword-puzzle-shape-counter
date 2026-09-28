@@ -1454,6 +1454,9 @@ mod tests {
     /// even with a budget small enough to spill after every input batch.
     #[test]
     fn disk_mode_counts() {
+        // big batches keep this fast: the tiny budget spills (and syncs 1024
+        // files) after every batch
+        std::env::set_var("BRITISH_DISK_BATCH", "64");
         let dir = std::env::temp_dir().join(format!("british-disk-test-{}", std::process::id()));
         for (n, want) in [(5usize, 17u128), (7, 650), (9, 68_956), (11, 60_384_181)] {
             let ctx = Ctx::new(n);
@@ -1471,14 +1474,17 @@ mod tests {
         let ctx = Ctx::new(n);
         let rows = allowed_rows(n);
         let hour = std::time::Duration::from_secs(3600);
+        // the last batch of a row always ends with a spill
+        let last = SHARDS.div_ceil(64);
         for tag in [
-            "batch:1:5",           // mid-row, work since the last checkpoint is lost
-            "spill-written:2:16",  // new run files written, not yet marked
-            "spill-renaming:1:16", // marked, half the files swapped in
-            "finalizing:1",        // half the run files renamed to shard files
-            "row-done:0",          // row finished, previous row not yet deleted
-            "glue:700",            // some last-row shards summed
+            "batch:1:5".to_string(), // mid-row, work since the last checkpoint is lost
+            format!("spill-written:2:{last}"), // new run files written, not yet marked
+            format!("spill-renaming:1:{last}"), // marked, half the files swapped in
+            "finalizing:1".to_string(), // half the run files renamed to shard files
+            "row-done:0".to_string(), // row finished, previous row not yet deleted
+            "glue:700".to_string(),  // some last-row shards summed
         ] {
+            let tag = tag.as_str();
             disk::set_crash(Some(tag));
             let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 disk::count(&ctx, &rows, &dir, 1000, hour, true, false)

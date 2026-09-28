@@ -281,7 +281,7 @@ fn r_k(k: &str) -> usize {
 
 fn keep_input(row: usize, s: usize) -> bool {
     match sample() {
-        Some((r, k)) if r == row => s % k == 0,
+        Some((r, k)) if r == row => s.is_multiple_of(k),
         _ => true,
     }
 }
