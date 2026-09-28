@@ -1067,21 +1067,6 @@ fn advance(
     shards
 }
 
-/// Sort `v` by key and sum the counts of equal keys, in place.
-fn sort_reduce(v: &mut Vec<(Packed, u64)>) {
-    v.sort_unstable_by_key(|e| e.0);
-    let mut w = 0usize;
-    for r in 0..v.len() {
-        if w > 0 && v[w - 1].0 == v[r].0 {
-            v[w - 1].1 += v[r].1;
-        } else {
-            v[w] = v[r];
-            w += 1;
-        }
-    }
-    v.truncate(w);
-}
-
 /// Flatten shard maps into plain vectors (24 bytes per state, no table
 /// overhead), freeing each map as soon as it is copied.
 fn into_parts(shards: Vec<Mutex<Map>>) -> Vec<Vec<(Packed, u64)>> {
@@ -1451,5 +1436,18 @@ mod tests {
                 parts = vec![by_row.into_iter().collect()];
             }
         }
+    }
+
+    /// Disk mode (spill + compaction + compact records) gives the right counts
+    /// even with a budget small enough to spill after every input batch.
+    #[test]
+    fn disk_mode_counts() {
+        let dir = std::env::temp_dir().join(format!("british-disk-test-{}", std::process::id()));
+        for (n, want) in [(5usize, 17u128), (7, 650), (9, 68_956), (11, 60_384_181)] {
+            let ctx = Ctx::new(n);
+            let rows = allowed_rows(n);
+            assert_eq!(disk::count(&ctx, &rows, &dir, 1000, false), want, "n={n}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

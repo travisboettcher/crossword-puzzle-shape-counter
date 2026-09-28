@@ -3,9 +3,10 @@
 //! Each finished row lives on disk as `SHARDS` files, each holding that
 //! shard's states sorted and merged. The next row is built by streaming input
 //! shards in batches into sharded hash maps; whenever the maps exceed `budget`
-//! entries, every shard is sorted and appended to its run file ("spill"). At
-//! the end of the row each shard's runs are merged (sort + sum) into its final
-//! file. Peak memory is about `budget` map entries plus one input batch,
+//! entries, every shard is sorted and merged into its single run file
+//! ("spill" with compaction: the run file always holds each distinct state
+//! once). At the end of the row each run file is merged with what is still in
+//! memory into the shard's final file. Peak memory is about `budget` map entries plus one input batch,
 //! regardless of row size; disk holds the input row, the output row and the
 //! spilled runs.
 //!
@@ -15,7 +16,7 @@
 //! up to whole bytes (12 bytes at n = 13, 14 at n = 15), followed by the count
 //! as a LEB128 varint.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,11 +25,13 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use super::{
-    advance_glue_part, is_palindrome, shard_of, sort_reduce, successors, Ctx, Map, Packed, FLUSH,
-    SHARDS, STAT_BITS,
+    advance_glue_part, is_palindrome, shard_of, successors, Ctx, Map, Packed, FLUSH, SHARDS,
+    STAT_BITS,
 };
 
-/// Input shards loaded into memory at once while building a row.
+/// Input shards loaded into memory at once while building a row (default;
+/// `BRITISH_DISK_BATCH` overrides). Each loaded state takes 24 bytes, so at
+/// 15×15 row 5 (~25M states per shard) 64 shards would need ~38 GB.
 const BATCH: usize = 64;
 
 // --- compact record encoding (E6) -------------------------------------------
@@ -121,17 +124,31 @@ fn write_rec(w: &mut impl Write, p: &Packed, cnt: u64, n: usize) -> std::io::Res
     }
 }
 
-fn read_all(path: &Path, n: usize, out: &mut Vec<(Packed, u64)>) {
-    let Ok(f) = File::open(path) else { return };
-    let mut r = BufReader::with_capacity(1 << 20, f);
-    let kb = key_bytes(n);
-    let mut buf = [0u8; 16];
-    loop {
+/// Streaming reader over a record file (empty if the file does not exist).
+struct RecReader {
+    r: Option<BufReader<File>>,
+    n: usize,
+}
+
+impl RecReader {
+    fn open(path: &Path, n: usize) -> RecReader {
+        let r = File::open(path)
+            .ok()
+            .map(|f| BufReader::with_capacity(1 << 20, f));
+        RecReader { r, n }
+    }
+}
+
+impl Iterator for RecReader {
+    type Item = (Packed, u64);
+    fn next(&mut self) -> Option<(Packed, u64)> {
+        let r = self.r.as_mut()?;
+        let kb = key_bytes(self.n);
+        let mut buf = [0u8; 16];
         if r.read_exact(&mut buf[..kb]).is_err() {
-            return;
+            return None;
         }
-        buf[kb..].fill(0);
-        let p = expand(u128::from_le_bytes(buf), n);
+        let p = expand(u128::from_le_bytes(buf), self.n);
         let (mut cnt, mut shift) = (0u64, 0);
         loop {
             let mut b = [0u8; 1];
@@ -139,21 +156,60 @@ fn read_all(path: &Path, n: usize, out: &mut Vec<(Packed, u64)>) {
             cnt |= ((b[0] & 0x7f) as u64) << shift;
             shift += 7;
             if b[0] & 0x80 == 0 {
-                break;
+                return Some((p, cnt));
             }
         }
-        out.push((p, cnt));
     }
 }
 
-fn write_all(path: &Path, v: &[(Packed, u64)], n: usize, append: bool) {
-    let f = OpenOptions::new()
-        .create(true)
-        .append(append)
-        .write(true)
-        .truncate(!append)
-        .open(path)
-        .expect("open shard file");
+fn read_all(path: &Path, n: usize, out: &mut Vec<(Packed, u64)>) {
+    out.extend(RecReader::open(path, n));
+}
+
+/// Merge the sorted, reduced file `old` (may be missing) with the sorted,
+/// reduced `mem`, summing equal keys, streaming into `out`. Returns the
+/// number of records written. `old` is only read, never loaded whole.
+fn merge_to(old: &Path, mem: &[(Packed, u64)], out: &Path, n: usize) -> usize {
+    let f = File::create(out).expect("create merge output");
+    let mut w = BufWriter::with_capacity(1 << 20, f);
+    let mut a = RecReader::open(old, n).peekable();
+    let mut b = mem.iter().copied().peekable();
+    let mut written = 0usize;
+    loop {
+        let next = match (a.peek(), b.peek()) {
+            (None, None) => break,
+            (Some(_), None) => a.next(),
+            (None, Some(_)) => b.next(),
+            (Some(x), Some(y)) => {
+                if x.0 < y.0 {
+                    a.next()
+                } else if y.0 < x.0 {
+                    b.next()
+                } else {
+                    let (k, c1) = a.next().unwrap();
+                    let (_, c2) = b.next().unwrap();
+                    Some((k, c1 + c2))
+                }
+            }
+        };
+        let (k, c) = next.unwrap();
+        write_rec(&mut w, &k, c, n).expect("write merge output");
+        written += 1;
+    }
+    w.flush().expect("flush merge output");
+    written
+}
+
+/// Drain a shard map into a key-sorted vector.
+fn sorted(m: &mut Map) -> Vec<(Packed, u64)> {
+    let mut v: Vec<(Packed, u64)> = m.drain().collect();
+    m.shrink_to_fit();
+    v.sort_unstable_by_key(|e| e.0);
+    v
+}
+
+fn write_all(path: &Path, v: &[(Packed, u64)], n: usize) {
+    let f = File::create(path).expect("create shard file");
     let mut w = BufWriter::with_capacity(1 << 20, f);
     for (p, c) in v {
         write_rec(&mut w, p, *c, n).expect("write shard file");
@@ -212,21 +268,29 @@ fn advance_disk(
         }
         live.fetch_add(m.len() - before, Ordering::Relaxed);
     };
+    let tmp = |s: usize| out.dir.join(format!("t{s:04}.bin"));
+    // Compaction: each spill merges into the shard's single run file, so a
+    // shard never holds more than one copy of the distinct states seen so far.
     let spill = || {
         maps.par_iter().enumerate().for_each(|(s, m)| {
             let mut m = m.lock().unwrap();
             if m.is_empty() {
                 return;
             }
-            let mut v: Vec<(Packed, u64)> = m.drain().collect();
-            m.shrink_to_fit();
-            v.sort_unstable_by_key(|e| e.0);
-            write_all(&run(s), &v, n, true);
+            let v = sorted(&mut m);
+            drop(m);
+            merge_to(&run(s), &v, &tmp(s), n);
+            fs::rename(tmp(s), run(s)).expect("replace run file");
         });
         live.store(0, Ordering::Relaxed);
         spills.fetch_add(1, Ordering::Relaxed);
     };
-    for batch in (0..SHARDS).collect::<Vec<_>>().chunks(BATCH) {
+    let batch_len = std::env::var("BRITISH_DISK_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(BATCH)
+        .max(1);
+    for batch in (0..SHARDS).collect::<Vec<_>>().chunks(batch_len) {
         let parts: Vec<Vec<(Packed, u64)>> = batch.par_iter().map(|&s| input.load(s, n)).collect();
         parts.par_iter().for_each_init(
             || vec![Vec::<(Packed, u64)>::new(); SHARDS],
@@ -253,15 +317,12 @@ fn advance_disk(
             spill();
         }
     }
-    // Merge each shard's runs with what is still in memory.
+    // Final merge: each shard's run file with what is still in memory.
     let total = AtomicUsize::new(0);
     maps.into_par_iter().enumerate().for_each(|(s, m)| {
-        let mut v: Vec<(Packed, u64)> = m.into_inner().unwrap().into_iter().collect();
-        read_all(&run(s), n, &mut v);
+        let v = sorted(&mut m.into_inner().unwrap());
+        total.fetch_add(merge_to(&run(s), &v, &out.shard(s), n), Ordering::Relaxed);
         let _ = fs::remove_file(run(s));
-        sort_reduce(&mut v);
-        total.fetch_add(v.len(), Ordering::Relaxed);
-        write_all(&out.shard(s), &v, n, false);
     });
     (out, total.into_inner())
 }
@@ -278,7 +339,7 @@ pub(super) fn count(ctx: &Ctx, rows: &[u32], dir: &Path, budget: usize, stats: b
     let _ = fs::remove_dir_all(dir);
     let mut cur = row_dir(usize::MAX);
     fs::create_dir_all(&cur.dir).expect("create dir");
-    write_all(&cur.shard(0), &[([0, 0], 1)], n, false);
+    write_all(&cur.shard(0), &[([0, 0], 1)], n);
     for i in 0..h - 1 {
         let (next, states) = advance_disk(ctx, &cur, row_dir(i), rows, i, budget, &spills);
         if stats {
