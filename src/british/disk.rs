@@ -35,8 +35,12 @@ use super::{
 /// input shard yields ~10^8 new row-5 states (~9 GB of maps).
 const BATCH: usize = 8;
 
-/// Input states per parallel work item.
-const CHUNK: usize = 16384;
+/// Bounds on input states per parallel work item. The size is chosen per
+/// batch so every thread gets several items: a fixed 16K-state chunk left a
+/// one-shard batch of 13×13 row 3 (~21K states) with 2 items, i.e. 2 busy
+/// threads out of 32.
+const CHUNK_MIN: usize = 256;
+const CHUNK_MAX: usize = 16384;
 
 // --- compact record encoding (E6) -------------------------------------------
 
@@ -280,7 +284,8 @@ fn r_k(k: &str) -> usize {
 }
 
 /// Output sampling (`BRITISH_SAMPLE_OUT=row:k`): when building `row`, generate
-/// every successor but store only those in every `k`-th output shard. Measures
+/// every successor but store only ~1/k of them (chosen by a hash independent
+/// of the shard, so every shard keeps some and the next row runs in parallel). Measures
 /// the full generation cost of a row while storing (and later gluing) a
 /// sample of it. Also **not** a count.
 fn sample_out() -> Option<(usize, usize)> {
@@ -488,7 +493,9 @@ fn advance_disk(
         // Parallelise within shards too, so a batch of one shard still uses
         // every core (small batches bound how far a batch can overshoot the
         // memory budget, which is only checked between batches).
-        let chunks: Vec<&[(Packed, u64)]> = parts.iter().flat_map(|p| p.chunks(CHUNK)).collect();
+        let states: usize = parts.iter().map(Vec::len).sum();
+        let chunk = (states / (rayon::current_num_threads() * 8)).clamp(CHUNK_MIN, CHUNK_MAX);
+        let chunks: Vec<&[(Packed, u64)]> = parts.iter().flat_map(|p| p.chunks(chunk)).collect();
         chunks.par_iter().for_each_init(
             || vec![Vec::<(Packed, u64)>::new(); SHARDS],
             |bufs, part| {
@@ -496,7 +503,14 @@ fn advance_disk(
                     successors(ctx, &ctx.unpack(p), row, &allowed, |ns| {
                         let pk = ctx.pack_canon(&ns);
                         let s = shard_of(&pk);
-                        if keep_k > 1 && !s.is_multiple_of(keep_k) {
+                        // an independent hash, so the kept states spread over
+                        // every shard (and the next row stays parallel)
+                        if keep_k > 1
+                            && !(((pk[0] ^ pk[1].rotate_left(17))
+                                .wrapping_mul(0xD6E8_FEB8_6659_FD93)
+                                >> 40) as usize)
+                                .is_multiple_of(keep_k)
+                        {
                             return;
                         }
                         bufs[s].push((pk, *cnt));
