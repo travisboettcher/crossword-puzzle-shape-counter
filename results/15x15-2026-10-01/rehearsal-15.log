@@ -1,0 +1,9 @@
+[2026-10-01 14:32:05]   REHEARSAL (BRITISH_SAMPLE): the result below is NOT a grid count
+[2026-10-01 14:32:06]   row 0: 5451 states, 0.1 MB on disk, 1 spills so far (58.91ms)
+[2026-10-01 14:32:06]   row 1: 864641 states, 13.0 MB on disk, 2 spills so far (456.01ms)
+[2026-10-01 14:32:10]   row 2: 17782460 states, 266.7 MB on disk, 3 spills so far (4.60s)
+[2026-10-01 14:32:45]   row 3: 386108733 states, 5793.3 MB on disk, 4 spills so far (39.78s)
+[2026-10-01 14:32:47]   row 4: 52066581 states, 782.0 MB on disk, 5 spills so far (41.55s)
+[2026-10-01 14:34:04]   row 5: 2336943 states, 35.4 MB on disk, 6 spills so far (118.31s)
+[2026-10-01 14:34:07]   row 6 fused with glue (121.44s)
+[2026-10-01 14:34:07] british n=15: 2149643054 (121.58s)

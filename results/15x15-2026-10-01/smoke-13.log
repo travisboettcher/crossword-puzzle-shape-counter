@@ -1,0 +1,7 @@
+[2026-10-01 14:29:33]   row 0: 1583 states, 0.0 MB on disk, 1 spills so far (47.67ms)
+[2026-10-01 14:29:33]   row 1: 119485 states, 1.6 MB on disk, 2 spills so far (150.23ms)
+[2026-10-01 14:29:34]   row 2: 1564046 states, 20.3 MB on disk, 3 spills so far (939.48ms)
+[2026-10-01 14:29:38]   row 3: 22125681 states, 287.7 MB on disk, 4 spills so far (5.13s)
+[2026-10-01 14:30:23]   row 4: 171394918 states, 2254.3 MB on disk, 5 spills so far (50.17s)
+[2026-10-01 14:31:39]   row 5 fused with glue (126.33s)
+[2026-10-01 14:31:39] british n=13: 162468835136 (126.34s)
