@@ -28,6 +28,10 @@ checked letters (Rule 6); no 3 consecutive unchecked letters (Rule 7); and no
 
 ## Method
 
+> **Full write-up:** [`docs/METHODS.md`](docs/METHODS.md) defines exactly what is
+> counted, describes every step, and argues why each shortcut preserves the
+> count, with the test that checks it. Run records live in [`results/`](results/).
+
 > **New here?** [`docs/walkthrough.html`](docs/walkthrough.html) is an interactive,
 > step-through visualization of everything below — open it in a browser to watch the
 > frontier sweep down a grid, merge, fold, and glue at the center.
@@ -201,6 +205,11 @@ scripts/run-15x15.sh status     # progress; rerun `run` to resume after a crash
 scripts/run-15x15.sh verify     # second run, different merge order: same sums?
 scripts/run-15x15.sh export     # small .tar.gz of logs, result, per-shard sums
 ```
+
+After a run, copy the `export` bundle into `results/<N>x<N>-<date>/` and fill in
+[`results/TEMPLATE.md`](results/TEMPLATE.md) as its README (example:
+[`results/13x13-2026-10-01`](results/13x13-2026-10-01/)). `verify` builds a
+separate binary with integer-overflow checks on.
 
 Memory budget and batch size are derived from free RAM (override with
 `BUDGET` / `BATCH`). `BRITISH_SAMPLE=row:k` (used by `rehearse`) reads only

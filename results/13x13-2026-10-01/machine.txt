@@ -1,0 +1,8 @@
+date:      2026-10-01T14:28:49+00:00
+host:      vultr
+cpu:       AMD EPYC-Turin Processor
+cores:     32 (using THREADS=32)
+mem avail: 244 GB
+disk free: 1710 GB at /root/crossword-data
+rustc:     rustc 1.99.0 (b940084d7 2026-09-28)
+commit:    4ddb9426eede5780e6f9ff46ebb636270c521e4f 1 local changes

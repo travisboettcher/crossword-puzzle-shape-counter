@@ -197,6 +197,12 @@ cmd_status() {
 cmd_verify() {
     [[ -f "$DATA_DIR/RESULT" ]] || die "no finished run in $DATA_DIR to verify against"
     build
+    # A separate binary with integer-overflow checks: any overflow aborts the
+    # verification instead of silently wrapping (release builds wrap).
+    say "building verification binary (overflow checks on)"
+    (cd "$REPO" && CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+        cargo build --release --quiet --target-dir "$REPO/target/verify")
+    local BIN="$REPO/target/verify/release/bench"
     local vdir="$DATA_DIR-verify" budget batch
     budget=$(( $(auto_budget) / 2 )); batch=$(( $(auto_batch) > 1 ? $(auto_batch) / 2 : 1 ))
     say "verify: second ${N}x${N} run with budget=$budget batch=$batch (different merge order)"
@@ -204,7 +210,8 @@ cmd_verify() {
     local a b
     a=$(cat "$DATA_DIR/RESULT"); b=$(cat "$vdir/RESULT")
     if [[ "$a" == "$b" ]] && diff -rq "$DATA_DIR/glue" "$vdir/glue" >/dev/null; then
-        say "verify PASS: $a, all 1024 per-shard partial sums identical" | tee "$RESULTS_DIR/verify-${N}.txt"
+        say "verify PASS: $a, all 1024 per-shard partial sums identical (overflow-checked build)" \
+            | tee "$RESULTS_DIR/verify-${N}.txt"
     else
         say "verify FAILED: $a vs $b" | tee "$RESULTS_DIR/verify-${N}.txt"
         diff -r "$DATA_DIR/glue" "$vdir/glue" | head -20 | tee -a "$RESULTS_DIR/verify-${N}.txt"
