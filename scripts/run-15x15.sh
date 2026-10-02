@@ -204,7 +204,11 @@ cmd_verify() {
         cargo build --release --quiet --target-dir "$REPO/target/verify")
     local BIN="$REPO/target/verify/release/bench"
     local vdir="$DATA_DIR-verify" budget batch
-    budget=$(( $(auto_budget) / 2 )); batch=$(( $(auto_batch) > 1 ? $(auto_batch) / 2 : 1 ))
+    # Keep the full memory budget: halving it made 15x15 row 5 ~3x slower
+    # (571 vs 154 spills, each rewriting the shard's growing run file). A
+    # different batch size alone changes which inputs are merged together and
+    # when spills happen, i.e. the merge order.
+    budget=$(auto_budget); batch=$(( $(auto_batch) * 2 ))
     say "verify: second ${N}x${N} run with budget=$budget batch=$batch (different merge order)"
     BUDGET=$budget BATCH=$batch N_RUN=$N count "$vdir" >> "$RESULTS_DIR/verify-${N}.log"
     local a b

@@ -26,7 +26,7 @@ Earlier ratios: 7→9 ×106, 9→11 ×876, 11→13 ×2,690.
 | `smoke` on the same machine (13×13 = 162,468,835,136) | PASS (126 s) |
 | `RESULT` equals the sum of the 1024 partial sums | PASS |
 | per-shard partial sums | all 1024 present and non-zero; 2.19–2.52 × 10¹², mean 2.34 × 10¹², spread 2.2% (shards are hash-assigned, so a damaged shard would likely stand out) |
-| `verify`: second full run, half budget, overflow checks on | **pending** |
+| `verify`: second full run (half budget, overflow checks on; row 4 and row 5 state counts already match exactly) | **in progress** |
 | sha256 of `glue-partial-sums.txt` | `de4289d15d72a03a55807696d3de8624cd873ea167835b2fab4fa224e7cf7c99` |
 
 ## Provenance
