@@ -1,0 +1,32 @@
+[2026-10-01 14:28:49] auto settings: budget=1178968522 entries, batch=1 shards
+[2026-10-01 14:28:49] building (release)
+[2026-10-01 14:28:57] fast test suite
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.52s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.50s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+[2026-10-01 14:29:08] check OK
+[2026-10-01 14:29:33] building (release)
+[2026-10-01 14:29:33] smoke: 13x13 in disk mode (expect 162468835136)
+[2026-10-01 14:31:39] smoke PASS: british n=13: 162468835136 (126.34s)
+[2026-10-01 14:32:05] building (release)
+[2026-10-01 14:32:05] rehearsal: 15x15, 1/1024 of row-4 input, 1/1024 of row-5 output (NOT a count)
+[2026-10-01 14:34:07] rehearsal finished; per-row timings in /root/crossword-puzzle-shape-counter/crossword-results/rehearsal-15.log
+[2026-10-01 14:41:53] exported 4.0K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261001-1441.tar.gz
+[2026-10-01 14:46:42] building (release)
+[2026-10-01 14:46:42] starting 15x15: RAYON_NUM_THREADS=32 BRITISH_DISK_BUDGET=1178968522 BRITISH_DISK_BATCH=1 DP_STATS=1 DATA_DIR=/root/crossword-data
+[2026-10-01 14:46:42] running in the background (pid 5442). Follow: tail -f /root/crossword-puzzle-shape-counter/crossword-results/run-15.log   Progress: scripts/run-15x15.sh status
+[2026-10-02 01:12:07] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0112.tar.gz
+[2026-10-02 01:20:03] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0120.tar.gz
+[2026-10-02 02:04:32] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0204.tar.gz
+[2026-10-02 02:07:52] building (release)
+[2026-10-02 02:07:52] building verification binary (overflow checks on)
+[2026-10-02 02:08:00] verify: second 15x15 run with budget=587068342 batch=1 (different merge order)
+[2026-10-02 02:12:41] building (release)
+[2026-10-02 02:12:41] building verification binary (overflow checks on)
+[2026-10-02 02:12:41] verify: second 15x15 run with budget=589484261 batch=1 (different merge order)
+[2026-10-03 02:54:24] verify PASS: 2393670267515481, all 1024 per-shard partial sums identical (overflow-checked build)

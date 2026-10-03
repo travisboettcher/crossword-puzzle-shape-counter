@@ -1,0 +1,16 @@
+date:      2026-10-01T14:46:42+00:00
+host:      vultr
+cpu:       AMD EPYC-Turin Processor
+cores:     32 (using THREADS=32)
+mem avail: 244 GB
+disk free: 1710 GB at /root/crossword-data
+rustc:     rustc 1.99.0 (b940084d7 2026-09-28)
+commit:    4ddb9426eede5780e6f9ff46ebb636270c521e4f 1 local changes
+[2026-10-01 14:46:42]   row 0: 5451 states, 0.1 MB on disk, 1 spills so far (59.15ms)
+[2026-10-01 14:46:43]   row 1: 864641 states, 13.0 MB on disk, 2 spills so far (236.40ms)
+[2026-10-01 14:46:44]   row 2: 17782460 states, 266.7 MB on disk, 3 spills so far (1.22s)
+[2026-10-01 14:47:12]   row 3: 386108733 states, 5793.3 MB on disk, 4 spills so far (29.11s)
+[2026-10-01 15:19:31]   row 4: 4485359212 states, 68264.3 MB on disk, 26 spills so far (1968.77s)
+[2026-10-01 22:00:06]   row 5: 16610709547 states, 262469.1 MB on disk, 154 spills so far (26003.83s)
+[2026-10-02 02:03:29]   row 6 fused with glue (40606.41s)
+[2026-10-02 02:03:29] british n=15: 2393670267515481 (40606.55s)

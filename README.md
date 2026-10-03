@@ -28,6 +28,10 @@ checked letters (Rule 6); no 3 consecutive unchecked letters (Rule 7); and no
 
 ## Method
 
+> **Full write-up:** [`docs/METHODS.md`](docs/METHODS.md) defines exactly what is
+> counted, describes every step, and argues why each shortcut preserves the
+> count, with the test that checks it. Run records live in [`results/`](results/).
+
 > **New here?** [`docs/walkthrough.html`](docs/walkthrough.html) is an interactive,
 > step-through visualization of everything below — open it in a browser to watch the
 > frontier sweep down a grid, merge, fold, and glue at the center.
@@ -75,21 +79,98 @@ value. Timings are wall-clock on 4 cores.
 | 5 | 12 | ✓ | 17 | ✓ |
 | 7 | 312 | ✓ | 650 | ✓ |
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
-| 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~73 s) |
-| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ⚠ memory-bound (see below) |
-| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open problem* | — |
+| 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~5 s) |
+| 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~12.5 min, 7 GB; or 12.6 min, 3.7 GB RAM on disk) |
+| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open (Keith)* | **2,393,670,267,515,481** (**new**; 11.3 h on 32 threads; verified by a second run; [run record](results/15x15-2026-10-01/)) |
 
 American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
-through 11×11.
+through 13×13. British 15×15, which Keith left open, is computed here for the first
+time and confirmed by an independent second run (different merge order,
+overflow-checked build) that reproduced the total and all 1024 per-shard
+partial sums.
 
-### British 13×13 — memory-bound here
+### British 13×13 — how it fits (and how fast)
 
-The same British DP is correct at 13×13 (Keith's value is 162,468,835,136), but
-it exceeds the ~15 GB of RAM in this environment. The frontier grows steeply:
-row 3 alone reaches ~49M states, and the two remaining top-half rows climb into
-the hundreds of millions, OOM-ing past ~16 GB. Reaching 13×13 (and the open
-15×15) would need a lower-memory state encoding or an external-memory / sharded
-transfer step — a natural next step, not a correctness gap.
+The British frontier grows steeply. The top half of a 13×13 grid passes through
+1.6K → 119K → 1.6M → 22M → 171M states (rows 0–4). Its last row is never
+stored: each successor is glued to the center as soon as it is generated. The
+run takes **12.5 min on 4 cores with a 7.3 GB peak** (12.6 min and 3.7 GB RAM with
+rows on disk, 60M budget; 13.2 min and 1.9 GB at a 20M budget). The first
+version of this DP ran out of memory past ~16 GB; the first working version
+took 1 h 59 min and 11.9 GB.
+
+* **Packed states.** A frontier is stored in 16 bytes: per column, a 5-bit code
+  for the vertical-run statistic plus a 3-bit component label.
+* **Mirror merging.** Reflecting a partial grid left-to-right preserves validity
+  and commutes with every transition, and the palindromic center rows glue to a
+  state and its mirror equally often. So each mirror pair is stored once, which
+  halves both the states and the work.
+* **Dead-run pruning.** A vertical run whose statistic cannot be completed in
+  the cells left in its column is cut immediately.
+* **Equivalent run statistics merged** (`Ctx::build_canon`). A bounded-horizon
+  bisimulation finds run statistics that behave identically from each row on;
+  new cells store the class representative. Only one merge exists
+  ((len ≥ 3, trail 0, d 2) ~ (len 2, trail 0, d 2)), but it removes ~10% of
+  states (13×13 row 4: 191M → 171M).
+* **Exact bitmask prefilter.** Per state, a few masks (columns forced white, runs
+  that die if the new cell is checked or unchecked, component columns, and a
+  row-validity lookup table) decide every rule for a candidate row. Only rows
+  that contain every forced column are enumerated. The successor is then built
+  with bitmask component merging (`step_fast`), not a union-find.
+* **Bitmask gluing** (`GluePre`) does the same for the center row. Its
+  per-column crossing checks come from a 64 KB lookup table, and the
+  pure-bitwise tests run as one branch-free pass over all center rows
+  (auto-vectorizable) before the table lookups and connectivity check.
+  Building with `-C target-cpu=native` (AVX2/AVX-512) measured no further
+  gain; the workload is dominated by branchy, data-dependent work and random
+  memory access, not wide arithmetic.
+* **One sharded concurrent map.** Successors merge into 1024 mutex-guarded
+  shards, so each state is held once instead of once per thread.
+* **Fused last row** (`BRITISH_PASSES=0`, the default from 13×13 up). Gluing
+  each successor directly costs more glue calls than merging first, but it
+  avoids storing ~670M states or rebuilding the row in several passes.
+  `BRITISH_PASSES=k` builds and glues the last row in `k` passes instead.
+
+The fast paths are checked against the straightforward all-rules `step` and
+`glue_ok` on every state and every candidate row through 9×9 (unit test in
+`src/british.rs`).
+
+Timing breakdown before the step/glue rewrite (11×11, last row): enumerating
+and prefiltering candidates 9%, building successors 51%, packing 30%, and
+hash-map inserts 8%.
+
+### Scaling experiments (toward 15×15)
+
+| experiment | outcome |
+|---|---|
+| Merge run statistics with identical futures | ✅ kept: −10% states, 18 → 12.5 min at 13×13; the statistic is otherwise minimal |
+| Rows on disk (`BRITISH_DISK_DIR`, `BRITISH_DISK_BUDGET`): 1024 sorted shard files per row; budgeted hash maps spill sorted runs, merged per shard | ✅ kept: 13×13 in 13.2 min / 1.9 GB vs 12.5 min / 7.3 GB in memory (+5% time, −74% RAM) |
+| Checkpoint / resume (disk mode) | ✅ kept: finished rows are marked `DONE`; every spill is a checkpoint (plus at least every `BRITISH_CKPT_MINUTES`, default 30); spills are write → mark → rename so a crash leaves the old or the new checkpoint; each last-row shard's partial sum is saved. Rerunning with the same `BRITISH_DISK_DIR` resumes. Tested by injected crashes at six points (unit test) and a `kill -9` mid-row at 13×13 |
+| Spill-run compaction: each spill stream-merges into the shard's single run file | ✅ kept: without it, building a row peaked at 4.4× the finished row on disk (13×13 row 4: 10.3 GB for a 2.25 GB row); with it, 1.08× (2.4 GB). Costs rewrite I/O per spill: +23% row time at a 20M budget (17 spills), +0% at 60M (8 spills) |
+| Compact records: 7 bits/column (5-bit run code + 2-bit non-crossing connectivity code) + varint count | ✅ kept as the disk format: ~13–15 bytes/state vs 24. No in-memory gain possible (a 12-byte key + 8-byte count still pads to 24) |
+| Cache of center-row gluing results in the fused last row (per-thread, direct-mapped, keyed by the mirror-canonical state) | ❌ 11×11 last row: 32% hits with 1M entries/thread, 47% with 4M, but 3.4 s → 4.8–5.3 s. After the glue lookup table and branch-free center filter, gluing is cheaper than packing the key plus a random cache read. (A first version hit 0.02%: it indexed by the low bits of a multiplicative hash, which only see the key's low bits.) |
+| Sort-and-reduce aggregation in memory instead of hash maps | ❌ 6% slower, 14% more RAM at 13×13 row 4; used only for disk runs |
+| Cell-by-cell (broken-profile) transfer (`BRITISH_CELL=1`) | ❌ identical states (unit-tested) but 6.6× slower: ~30M hash merges for 11×11 row 3 vs ~2.4M row successors, because the exact row prefilter never builds dead rows |
+
+**Measured 15×15 frontier** (disk mode, 4 cores, 7.4 GB RAM): rows 0–3 hold
+5.5K → 865K → 17.8M → **386M** states (row 3: 173 s, 5.8 GB on disk). The
+growth factor per row is nearly identical from 11→13 and 13→15 (×7.3/7.2,
+×11.6/11.4, ×17.7/17.5), so the projection is fairly tight: row 4 ≈ 4.7B states
+(~70 GB), row 5 ≈ 25B (~375 GB), then the fused last row. Rows 6–14 are never
+stored: row 6 is glued as it is generated, row 7 is the center, and rows 8–14
+are the 180° image. Peak disk is while building row 5: ~70 GB + ~1.08 × 375 GB
+≈ **475 GB** with compaction. Spills rewrite each shard's run file, so extra
+I/O grows with the number of spills (at most one per input batch). Give the
+budget as much RAM as possible, and set `BRITISH_DISK_BATCH` so a batch of
+input shards fits in RAM (~600 MB per row-5 shard). **Measured 15×15 per-state costs** (rehearsal: 1/1024 of row-4 input,
+all of row 5 generated, 1/1024 of it stored and glued): building row 5 costs
+**35 µs of CPU per row-4 state**, and the fused last row costs **149 µs per
+row-5 state** (~10× its 13×13 cost). With row 4 ≈ 4.7B and row 5 ≈ 25B
+states, that is ~50–90 CPU-hours for row 5 and **~1,000 CPU-hours for the last
+row** (600–1,500, mostly from the uncertainty in the row-5 size): roughly
+**700–1,700 CPU-hours in total**, ~90% in the last row. (An earlier rehearsal
+at a tiny memory budget measured ~680 µs per row-4 state; that was compaction
+rewriting a 14 GB run file every few shards, not computation.)
 
 ## Usage
 
@@ -97,10 +178,46 @@ transfer step — a natural next step, not a correctness gap.
 # Count via the DP (American uses the folded transfer matrix; British likewise)
 cargo run --release --bin count -- --style american --n 13
 cargo run --release --bin count -- --style british  --n 9
+cargo run --release --bin count -- --style british --n 13   # ~12.5 min, 7 GB
+
+# Rows on disk: bounded RAM (budget = hash-map entries before spilling).
+# Rerunning with the same directory resumes after a crash or kill;
+# BRITISH_DISK_FRESH=1 discards it. BRITISH_CKPT_MINUTES (default 30) bounds
+# the work lost; BRITISH_DISK_BATCH sets input shards loaded at once.
+BRITISH_DISK_DIR=/path/to/scratch BRITISH_DISK_BUDGET=60000000 \
+  cargo run --release --bin count -- --style british --n 13   # ~12.6 min, 3.7 GB RAM, 2.5 GB disk
 
 # Timing / frontier statistics
 DP_STATS=1 cargo run --release --bin bench -- american 13
+DP_STATS=1 cargo run --release --bin bench -- british 13
 ```
+
+## Running 15×15
+
+`scripts/run-15x15.sh` drives the whole run on a large machine (target: 64+
+cores, 128 GB+ RAM, ~1 TB local NVMe; peak disk ~475 GB):
+
+```sh
+export DATA_DIR=/nvme/crossword-data RESULTS_DIR=~/crossword-results
+scripts/run-15x15.sh check      # resources, build, fast tests
+scripts/run-15x15.sh smoke      # 13×13 must give 162,468,835,136
+scripts/run-15x15.sh scaling    # 13×13 at 1/8 … all cores
+scripts/run-15x15.sh rehearse   # 15×15 on a 1/1024 sample to the end (not a count)
+scripts/run-15x15.sh run        # the real count, in the background
+scripts/run-15x15.sh status     # progress; rerun `run` to resume after a crash
+scripts/run-15x15.sh verify     # second run, different merge order: same sums?
+scripts/run-15x15.sh export     # small .tar.gz of logs, result, per-shard sums
+```
+
+After a run, copy the `export` bundle into `results/<N>x<N>-<date>/` and fill in
+[`results/TEMPLATE.md`](results/TEMPLATE.md) as its README (example:
+[`results/13x13-2026-10-01`](results/13x13-2026-10-01/)). `verify` builds a
+separate binary with integer-overflow checks on.
+
+Memory budget and batch size are derived from free RAM (override with
+`BUDGET` / `BATCH`). `BRITISH_SAMPLE=row:k` (used by `rehearse`) reads only
+every k-th input shard when building `row`, which exercises every code path at
+full width but does not produce a count.
 
 ## Tests
 
@@ -118,6 +235,8 @@ cargo test --release -- --ignored # slow anchors (n = 13, 15; British 11, 13)
 | `src/brute.rs` | reference enumerators (symmetric and non-symmetric) |
 | `src/dp.rs` | American folded transfer-matrix DP + non-symmetric DP |
 | `src/british.rs` | British folded DP with the checked-letter word rules |
+| `src/british/disk.rs` | rows on disk: sharded spill with streaming compaction, compact record encoding |
+| `src/british/cell.rs` | cell-by-cell transfer (experiment; slower, kept as a cross-check) |
 | `src/bin/count.rs` | CLI |
 
 ## References
