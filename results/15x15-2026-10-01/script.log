@@ -22,3 +22,11 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 [2026-10-01 14:46:42] running in the background (pid 5442). Follow: tail -f /root/crossword-puzzle-shape-counter/crossword-results/run-15.log   Progress: scripts/run-15x15.sh status
 [2026-10-02 01:12:07] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0112.tar.gz
 [2026-10-02 01:20:03] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0120.tar.gz
+[2026-10-02 02:04:32] exported 12K: /root/crossword-puzzle-shape-counter/crossword-results/crossword-15x15-20261002-0204.tar.gz
+[2026-10-02 02:07:52] building (release)
+[2026-10-02 02:07:52] building verification binary (overflow checks on)
+[2026-10-02 02:08:00] verify: second 15x15 run with budget=587068342 batch=1 (different merge order)
+[2026-10-02 02:12:41] building (release)
+[2026-10-02 02:12:41] building verification binary (overflow checks on)
+[2026-10-02 02:12:41] verify: second 15x15 run with budget=589484261 batch=1 (different merge order)
+[2026-10-03 02:54:24] verify PASS: 2393670267515481, all 1024 per-shard partial sums identical (overflow-checked build)

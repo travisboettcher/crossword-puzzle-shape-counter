@@ -1,0 +1,10 @@
+[2026-10-02 02:08:00]   row 0: 5451 states, 0.1 MB on disk, 1 spills so far (57.12ms)
+[2026-10-02 02:08:01]   row 1: 864641 states, 13.0 MB on disk, 2 spills so far (462.45ms)
+[2026-10-02 02:08:05]   row 2: 17782460 states, 266.7 MB on disk, 3 spills so far (4.60s)
+[2026-10-02 02:08:41]   row 3: 386108733 states, 5793.3 MB on disk, 4 spills so far (40.70s)
+[2026-10-02 02:12:41]   resuming from /root/crossword-data-verify
+[2026-10-02 02:12:41]   row 4: resuming at input batch 34/1024
+[2026-10-02 03:07:12]   row 4: 4485359212 states, 68264.3 MB on disk, 59 spills so far (3270.54s)
+[2026-10-02 22:15:30]   row 5: 16610709547 states, 262469.1 MB on disk, 571 spills so far (72168.46s)
+[2026-10-03 02:54:22]   row 6 fused with glue (88901.06s)
+[2026-10-03 02:54:22] british n=15: 2393670267515481 (88901.20s)

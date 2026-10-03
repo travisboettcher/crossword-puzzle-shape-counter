@@ -81,11 +81,13 @@ value. Timings are wall-clock on 4 cores.
 | 9 | 31,187 | ✓ | 68,956 | ✓ |
 | 11 | 17,438,702 | ✓ | 60,384,181 | ✓ (~5 s) |
 | 13 | 40,575,832,476 | ✓ (~15 s) | 162,468,835,136 | ✓ (~12.5 min, 7 GB; or 12.6 min, 3.7 GB RAM on disk) |
-| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open (Keith)* | **2,393,670,267,515,481** (new; 11.3 h on 32 threads; [run record](results/15x15-2026-10-01/), verification pending) |
+| 15 | 404,139,015,237,875 | ✓ (~14 min) | *open (Keith)* | **2,393,670,267,515,481** (**new**; 11.3 h on 32 threads; verified by a second run; [run record](results/15x15-2026-10-01/)) |
 
 American reproduces A323839 through 15×15. British reproduces Keith's `#Total`
 through 13×13. British 15×15, which Keith left open, is computed here for the first
-time; it is a single run until the `verify` rerun confirms it.
+time and confirmed by an independent second run (different merge order,
+overflow-checked build) that reproduced the total and all 1024 per-shard
+partial sums.
 
 ### British 13×13 — how it fits (and how fast)
 

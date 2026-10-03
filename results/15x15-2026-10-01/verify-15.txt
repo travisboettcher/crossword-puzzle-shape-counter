@@ -1,0 +1,1 @@
+[2026-10-03 02:54:24] verify PASS: 2393670267515481, all 1024 per-shard partial sums identical (overflow-checked build)
